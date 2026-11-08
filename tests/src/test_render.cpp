@@ -11,6 +11,7 @@
 
 #ifdef IGNIS_RENDERER_VULKAN
 #include "ignis/renderer/vulkan_renderer.h"
+#include <cstdio>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
