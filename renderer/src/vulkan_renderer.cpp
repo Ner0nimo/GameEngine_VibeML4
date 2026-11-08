@@ -43,6 +43,8 @@ bool VulkanRenderer::init(Window*, std::string& err) {
 void VulkanRenderer::shutdown() {}
 void VulkanRenderer::on_resize(u32, u32) {}
 void VulkanRenderer::render(Scene&, const Camera&, f32) {}
+void VulkanRenderer::present() {}
+RawVulkanHandles VulkanRenderer::raw_handles() const { return {}; }
 void VulkanRenderer::set_debug_lines(const std::vector<DebugLine>& lines) { debug_lines_ = lines; }
 bool VulkanRenderer::init_offscreen(u32, u32, std::string& err) {
     err = "renderer requires a graphics build";
@@ -1342,25 +1344,57 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
     ICommandList* clp = cl;
     I.dev->executeCommandLists(&clp, 1);
 
-    if (!I.offscreen && I.swapchain) {
-        // NVRHI submitted the command buffer in executeCommandLists(); wait for
-        // it to finish, then present on the same queue (no extra sync needed).
-        I.dev->waitForIdle();
-        VkPresentInfoKHR pi{};
-        pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        pi.swapchainCount = 1;
-        pi.pSwapchains = &I.swapchain;
-        pi.pImageIndices = &swapIndex;
-        vkQueuePresentKHR(I.queue, &pi);
-    } else {
-        I.dev->waitForIdle();
-    }
+    // NVRHI submitted the command buffer in executeCommandLists(); wait for it
+    // to finish. Presenting is done separately in present() so the editor can
+    // draw its UI on the swapchain image in between.
+    I.dev->waitForIdle();
+    last_swap_index_ = swapIndex;
 
     stats_.draw_calls = static_cast<u32>(draws.size());
     stats_.triangles = 0;
     for (const auto& d : draws) {
         for (const auto& p : d.mesh->prims) stats_.triangles += p.indexCount / 3;
     }
+}
+
+void VulkanRenderer::present() {
+#ifdef IGNIS_RENDERER_VULKAN
+    if (!impl_) return;
+    auto& I = *impl_;
+    if (I.offscreen || !I.swapchain) return;
+    VkPresentInfoKHR pi{};
+    pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &I.swapchain;
+    pi.pImageIndices = &last_swap_index_;
+    vkQueuePresentKHR(I.queue, &pi);
+#else
+    (void)0;
+#endif
+}
+
+RawVulkanHandles VulkanRenderer::raw_handles() const {
+    RawVulkanHandles h;
+#ifdef IGNIS_RENDERER_VULKAN
+    if (!impl_) return h;
+    auto& I = *impl_;
+    h.windowed = !I.offscreen && I.swapchain != VK_NULL_HANDLE;
+    h.instance = I.instance;
+    h.physical_device = I.physical;
+    h.device = I.device;
+    h.queue = I.queue;
+    h.queue_family = I.queueFamily;
+    h.swap_index = last_swap_index_;
+    h.width = I.swapExtent.width;
+    h.height = I.swapExtent.height;
+    h.swap_format = static_cast<i32>(I.swapFormat);
+    h.swap_image_count = static_cast<u32>(I.swapImages.size());
+    if (h.windowed) {
+        h.swapchain = I.swapchain;
+        h.swap_image = I.swapImages[last_swap_index_];
+    }
+#endif
+    return h;
 }
 
 #endif // IGNIS_RENDERER_VULKAN

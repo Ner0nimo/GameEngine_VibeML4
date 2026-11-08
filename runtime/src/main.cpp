@@ -229,7 +229,10 @@ int main(int argc, char** argv) {
         }
         u32 w = 0, h = 0;
         window.framebuffer_size(w, h);
-        if (w > 0 && h > 0) renderer.render(scene, camera, dt);
+        if (w > 0 && h > 0) {
+            renderer.render(scene, camera, dt);
+            renderer.present();
+        }
     }
     renderer.shutdown();
     window.shutdown();
