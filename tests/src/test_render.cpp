@@ -11,7 +11,11 @@
 
 #ifdef IGNIS_RENDERER_VULKAN
 #include "ignis/renderer/vulkan_renderer.h"
+#include <vulkan/vulkan.h>
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.hpp>
 #include <cstdio>
+#include <vector>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -87,6 +91,123 @@ bool render_cube(std::vector<u8>& px) {
 }
 
 } // namespace
+
+#ifdef IGNIS_RENDERER_VULKAN
+// Definitive comparison: raw linked vk* call vs vulkan-hpp dynamic dispatcher.
+void ignis_init_vulkan_dispatch(void*, void*);
+TEST(Render, RawVsDispatcherCall) {
+    VkApplicationInfo app{};
+    app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app.apiVersion = VK_API_VERSION_1_3;
+    VkInstance inst = VK_NULL_HANDLE;
+    VkInstanceCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ici.pApplicationInfo = &app;
+    ASSERT_EQ(vkCreateInstance(&ici, nullptr, &inst), VK_SUCCESS);
+    u32 n = 0;
+    vkEnumeratePhysicalDevices(inst, &n, nullptr);
+    std::fprintf(stderr, "ENUM count=%u\n", n);
+    ASSERT_GT(n, 0u);
+    std::vector<VkPhysicalDevice> devs(n);
+    vkEnumeratePhysicalDevices(inst, &n, devs.data());
+    std::fprintf(stderr, "ENUM wrote=%u first=%p\n", n, static_cast<void*>(devs[0]));
+    VkPhysicalDevice phys = devs[0];
+    ASSERT_NE(phys, VK_NULL_HANDLE);
+
+    // 1) RAW call through the linked libvulkan symbol.
+    VkPhysicalDeviceProperties2 p2{};
+    p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    vkGetPhysicalDeviceProperties2(phys, &p2);
+    std::fprintf(stderr, "RAW-CALL OK: %s\n", p2.properties.deviceName);
+
+    // Create a real device so the dispatcher gets a valid VkDevice.
+    u32 qn = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn, nullptr);
+    u32 qf = 0;
+    for (u32 i = 0; i < qn; ++i) {
+        VkQueueFamilyProperties qp{};
+        vkGetPhysicalDeviceQueueFamilyProperties(phys, &i, &qp);
+        if (qp.queueFlags & VK_QUEUE_GRAPHICS_BIT) { qf = i; break; }
+    }
+    const float pri = 1.f;
+    VkDeviceQueueCreateInfo qci{};
+    qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    qci.queueFamilyIndex = qf;
+    qci.queueCount = 1;
+    qci.pQueuePriorities = &pri;
+    VkDeviceCreateInfo dci{};
+    dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos = &qci;
+    VkDevice dev = VK_NULL_HANDLE;
+    ASSERT_EQ(vkCreateDevice(phys, &dci, nullptr, &dev), VK_SUCCESS);
+
+    // 2) Dispatcher call (same function via defaultDispatchLoaderDynamic).
+    ignis_init_vulkan_dispatch(inst, dev);
+    auto& d = vk::detail::defaultDispatchLoaderDynamic;
+    ASSERT_NE(d.vkGetPhysicalDeviceProperties2, nullptr);
+    VkPhysicalDeviceProperties2 p3{};
+    p3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    d.vkGetPhysicalDeviceProperties2(phys, &p3);
+    std::fprintf(stderr, "DISPATCH-CALL OK: %s\n", p3.properties.deviceName);
+
+    // 3) Dispatcher call WITH pNext chain, exactly like NVRHI's Device ctor.
+    VkPhysicalDeviceSubgroupProperties sub{};
+    sub.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+    VkPhysicalDeviceProperties2 p4{};
+    p4.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    p4.pNext = &sub;
+    d.vkGetPhysicalDeviceProperties2(phys, &p4);
+    std::fprintf(stderr, "DISPATCH-CALL-PNEXT OK: %s subgroupSize=%u\n",
+                 p4.properties.deviceName, sub.subgroupSize);
+
+    // 4) Dispatcher vkCreateSemaphore with timeline pNext, like NVRHI's Queue.
+    VkSemaphoreTypeCreateInfo st{};
+    st.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    st.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    VkSemaphoreCreateInfo sc{};
+    sc.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    sc.pNext = &st;
+    VkSemaphore sem = VK_NULL_HANDLE;
+    VkResult sr = d.vkCreateSemaphore(dev, &sc, nullptr, &sem);
+    std::fprintf(stderr, "DISPATCH-SEMAPHORE result=%d\n", static_cast<int>(sr));
+
+    // 4b) Same semaphore creation but through the vk:: wrapper exactly like NVRHI.
+    {
+        vk::SemaphoreTypeCreateInfo sti;
+        sti.setSemaphoreType(vk::SemaphoreType::eTimeline);
+        vk::SemaphoreCreateInfo sci;
+        sci.setPNext(&sti);
+        vk::Device vdev(dev);
+        auto sem2 = vdev.createSemaphore(sci, nullptr);
+        std::fprintf(stderr, "VKHPP-SEMAPHORE ok=%d\n", sem2 ? 1 : 0);
+    }
+
+    // 4c) Exact NVRHI Queue replication: pointer-typed null allocator.
+    {
+        vk::AllocationCallbacks* cb = nullptr;
+        vk::Device vdev(dev);
+        vk::SemaphoreTypeCreateInfo sti;
+        sti.setSemaphoreType(vk::SemaphoreType::eTimeline);
+        vk::SemaphoreCreateInfo sci;
+        sci.setPNext(&sti);
+        auto s = vdev.createSemaphore(sci, cb);
+        std::fprintf(stderr, "VKHPP-SEM-PTRCB ok=%d\n", s ? 1 : 0);
+    }
+
+    // 4d) vk::PhysicalDevice::getProperties2 via wrapper + default dispatcher.
+    {
+        vk::PhysicalDevice vphys(phys);
+        vk::PhysicalDeviceProperties2 pp;
+        vphys.getProperties2(&pp);
+        std::fprintf(stderr, "VKHPP-GETPROPS OK: %s\n", pp.properties.deviceName.data());
+    }
+
+    // NOTE: full nvrhi::vulkan::createDevice is exercised via the fork-guarded
+    // gpu_render_works() probe below - on some dev Mesa builds the driver crashes
+    // inside NVRHI's dispatcher calls, which must not kill this test process.
+}
+#endif
 
 TEST(Render, OffscreenCubeLit) {
     if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
