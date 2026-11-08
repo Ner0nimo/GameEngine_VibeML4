@@ -1,0 +1,68 @@
+{
+  "name": "test_scene",
+  "entities": [
+    {
+      "id": 1,
+      "name": "Ground",
+      "parent": 0,
+      "components": {
+        "Transform": { "position": [0, 0, 0], "rotation": [1, 0, 0, 0], "scale": [1, 1, 1] },
+        "RigidBody": { "type": "Static", "mass": 1, "linear_damping": 0 },
+        "Collider": { "shape": "Box", "half_extents": [10, 1, 10], "radius": 0.5, "height": 1 }
+      }
+    },
+    {
+      "id": 2,
+      "name": "FallingBox",
+      "parent": 0,
+      "components": {
+        "Transform": { "position": [0, 5, 0], "rotation": [1, 0, 0, 0], "scale": [1, 1, 1] },
+        "RigidBody": { "type": "Dynamic", "mass": 1, "linear_damping": 0 },
+        "Collider": { "shape": "Box", "half_extents": [0.5, 0.5, 0.5], "radius": 0.5, "height": 1 }
+      }
+    },
+    {
+      "id": 3,
+      "name": "Mover",
+      "parent": 0,
+      "components": {
+        "Transform": { "position": [0, 1, 0], "rotation": [1, 0, 0, 0], "scale": [1, 1, 1] },
+        "Script": { "path": "scripts/mover.lua", "enabled": true }
+      }
+    },
+    {
+      "id": 4,
+      "name": "Target",
+      "parent": 0,
+      "components": {
+        "Transform": { "position": [3, 1, 0], "rotation": [1, 0, 0, 0], "scale": [1, 1, 1] }
+      }
+    },
+    {
+      "id": 5,
+      "name": "Camera",
+      "parent": 0,
+      "components": {
+        "Transform": { "position": [0, 3, 8], "rotation": [1, 0, 0, 0], "scale": [1, 1, 1] },
+        "Camera": { "fov_y_deg": 60, "z_near": 0.1, "z_far": 1000, "clear_color": [0.02, 0.02, 0.03, 1], "active": true }
+      }
+    },
+    {
+      "id": 6,
+      "name": "Sun",
+      "parent": 0,
+      "components": {
+        "Transform": { "position": [0, 10, 0], "rotation": [1, 0, 0, 0], "scale": [1, 1, 1] },
+        "DirectionalLight": { "direction": [0.3, -1, 0.2], "color": [1, 1, 1], "intensity": 3, "cast_shadow": true }
+      }
+    }
+  ],
+  "prefabs": {
+    "SpawnedPrefab": {
+      "name": "SpawnedPrefab",
+      "components": {
+        "Transform": { "position": [1, 2, 3], "rotation": [1, 0, 0, 0], "scale": [1, 1, 1] }
+      }
+    }
+  }
+}

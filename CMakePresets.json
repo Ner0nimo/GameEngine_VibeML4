@@ -1,0 +1,54 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 27, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "headless",
+      "displayName": "Headless (core + tests + exporter, no GPU deps)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/headless",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "IGNIS_WITH_GRAPHICS": "OFF",
+        "IGNIS_BUILD_EDITOR": "OFF",
+        "IGNIS_BUILD_TESTS": "ON",
+        "IGNIS_BUILD_EXPORTER": "ON"
+      }
+    },
+    {
+      "name": "full",
+      "displayName": "Full (editor + graphics, needs X11/Wayland dev + Vulkan headers)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/full",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "IGNIS_WITH_GRAPHICS": "ON",
+        "IGNIS_BUILD_EDITOR": "ON",
+        "IGNIS_BUILD_TESTS": "ON",
+        "IGNIS_BUILD_EXPORTER": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release distribution build (runtime stripped of editor)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IGNIS_WITH_GRAPHICS": "ON",
+        "IGNIS_BUILD_EDITOR": "OFF",
+        "IGNIS_BUILD_TESTS": "OFF",
+        "IGNIS_BUILD_EXPORTER": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "headless", "configurePreset": "headless" },
+    { "name": "full", "configurePreset": "full" },
+    { "name": "release", "configurePreset": "release" }
+  ],
+  "testPresets": [
+    { "name": "headless", "configurePreset": "headless", "output": { "outputOnFailure": true } },
+    { "name": "full", "configurePreset": "full", "output": { "outputOnFailure": true } }
+  ]
+}

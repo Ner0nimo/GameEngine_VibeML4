@@ -1,0 +1,19 @@
+# Build
+build/
+out/
+cmake-build-*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+compile_commands.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local artifacts
+*.ignispak
+.dist/
+logs/

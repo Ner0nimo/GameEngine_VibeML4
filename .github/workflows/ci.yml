@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  headless:
+    name: Headless build + tests (no GPU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build cmake git
+      - name: Configure
+        run: cmake --preset headless
+      - name: Build
+        run: cmake --build --preset headless -j
+      - name: Test
+        run: ctest --preset headless --output-on-failure
+      - name: Runtime smoke test (feature scene, headless)
+        run: |
+          ./build/headless/runtime/ignis_runtime --headless --frames 300 \
+            --commands scripts/commands.jsonl scenes/test_scene.scene.json > /dev/null
+      - name: Export smoke test
+        run: |
+          ./build/headless/tools/exporter/ignis_export \
+            --scene scenes/test_scene.scene.json --include scripts --include assets \
+            --out /tmp/dist
+          ./build/headless/runtime/ignis_runtime --headless --frames 60 \
+            --pak /tmp/dist/game.ignispak > /dev/null
+
+  full:
+    name: Full build with editor + Vulkan (compile/link)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain + graphics deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build cmake git \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols \
+            libvulkan-dev glslang-tools libasound2-dev libpulse-dev
+      - name: Configure
+        run: cmake --preset full
+      - name: Build
+        run: cmake --build --preset full -j
+      - name: Test
+        run: ctest --preset full --output-on-failure
