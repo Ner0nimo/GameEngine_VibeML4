@@ -10,6 +10,7 @@
 #include "ignis/scene/scene.h"
 
 #ifdef IGNIS_RENDERER_VULKAN
+#include "ignis/physics/physics_world.h"
 #include "ignis/renderer/vulkan_renderer.h"
 #include <vulkan/vulkan.h>
 #include <cstdio>
@@ -236,12 +237,61 @@ TEST(Render, DebugLinesDrawn) {
     renderer.shutdown();
 }
 
+// The real test scene (scenes/test_scene.scene.json) must render visible
+// geometry offscreen, not just the sky/clear color - guards against a black
+// window in the windowed runtime.
+TEST(Render, TestSceneOffscreenRenders) {
+    if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
+    Scene scene;
+    register_builtin_components(scene.world());
+    PhysicsSystem::register_components(scene.world());
+    ASSERT_TRUE(scene.load_file(std::string(IGNIS_SCENES_DIR) + "/test_scene.scene.json"));
+
+    Camera camera;
+    bool haveCam = false;
+    for (EntityId e : scene.world().view<CameraComponent, TransformComponent>()) {
+        const auto* cc = scene.world().get<CameraComponent>(e);
+        const auto* tc = scene.world().get<TransformComponent>(e);
+        if (cc && cc->active && tc) {
+            camera.position = tc->position;
+            camera.rotation = tc->rotation;
+            camera.fov_y_deg = cc->fov_y_deg;
+            camera.z_near = cc->z_near;
+            camera.z_far = cc->z_far;
+            haveCam = true;
+        }
+    }
+    ASSERT_TRUE(haveCam) << "test scene must have an active camera";
+
+    VulkanRenderer renderer;
+    std::string err;
+    ASSERT_TRUE(renderer.init_offscreen(128, 128, err)) << err;
+    renderer.render(scene, camera, 1.f / 60.f);
+    std::vector<u8> px;
+    ASSERT_TRUE(renderer.readback(px));
+    ASSERT_EQ(px.size(), 128u * 128u * 4u);
+
+    // Sky = clear color (0.05, 0.08, 0.16) -> roughly (61, 77, 112) after
+    // tonemap+gamma, sum ~250. Lit geometry (red cube ~ (191,101,101)) is
+    // clearly brighter. Require a visible amount of non-sky pixels.
+    u32 lit = 0;
+    for (size_t i = 0; i < px.size(); i += 4) {
+        if (static_cast<u32>(px[i]) + px[i + 1] + px[i + 2] > 300u) ++lit;
+    }
+    std::fprintf(stderr, "scene render: lit pixels=%u / %u\n", lit, 128u * 128u);
+    EXPECT_GT(lit, 128u * 128u / 50u); // > 2% of the frame is lit geometry
+    renderer.shutdown();
+}
+
 #else
 
 TEST(Render, OffscreenCubeLit) {
     GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
 }
 TEST(Render, DebugLinesDrawn) {
+    GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
+}
+TEST(Render, TestSceneOffscreenRenders) {
     GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
 }
 
