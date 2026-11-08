@@ -30,6 +30,11 @@
 #include <sstream>
 #include <string>
 
+#ifdef IGNIS_WITH_GRAPHICS
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 using namespace ignis;
 
 namespace {
@@ -176,6 +181,29 @@ int main(int argc, char** argv) {
     if (!window.init(err)) {
         IGNIS_ERROR("window init failed: {}", err);
         return 1;
+    }
+    {
+        // Probe the Vulkan stack in a forked child first: on some driver stacks
+        // the driver itself crashes when NVRHI calls into it, and the runtime
+        // must fail with a clear message instead of a segfault.
+        auto probe = []() -> bool {
+            const pid_t pid = fork();
+            if (pid == 0) {
+                VulkanRenderer probeRenderer;
+                std::string probeErr;
+                if (!probeRenderer.init_offscreen(64, 64, probeErr)) _exit(2);
+                probeRenderer.shutdown();
+                _exit(0);
+            }
+            int status = 0;
+            waitpid(pid, &status, 0);
+            return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        };
+        if (!probe()) {
+            IGNIS_ERROR("Vulkan/NVRHI device not usable on this system (driver crash or no GPU). "
+                        "Run with --headless for simulation-only mode.");
+            return 1;
+        }
     }
     VulkanRenderer renderer;
     if (!renderer.init(&window, err)) {

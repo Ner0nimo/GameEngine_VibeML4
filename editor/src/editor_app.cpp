@@ -5,6 +5,11 @@
 
 #include "ignis/core/log.h"
 
+#ifdef IGNIS_WITH_GRAPHICS
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 namespace ignis {
 
 EditorApp::EditorApp() = default;
@@ -17,10 +22,31 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
     IGNIS_ERROR("editor requires a graphics build (IGNIS_WITH_GRAPHICS=ON)");
     return 1;
 #else
+    // Probe the Vulkan stack in a forked child first (some driver stacks crash
+    // inside NVRHI dispatcher calls - fail with a message, not a segfault).
+    {
+        auto probe = []() -> bool {
+            const pid_t pid = fork();
+            if (pid == 0) {
+                VulkanRenderer probeRenderer;
+                std::string probeErr;
+                if (!probeRenderer.init_offscreen(64, 64, probeErr)) _exit(2);
+                probeRenderer.shutdown();
+                _exit(0);
+            }
+            int status = 0;
+            waitpid(pid, &status, 0);
+            return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        };
+        if (!probe()) {
+            IGNIS_ERROR("Vulkan/NVRHI device not usable on this system (driver crash or no GPU).");
+            return 1;
+        }
+    }
     // TODO(graphics): window + renderer + ImGui panels + gizmo + command file watcher.
     (void)scene_path;
     (void)commands_path;
-    IGNIS_ERROR("editor not yet implemented in this build");
+    IGNIS_ERROR("editor UI not yet implemented in this build");
     return 1;
 #endif
 }
