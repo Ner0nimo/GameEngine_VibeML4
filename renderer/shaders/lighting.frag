@@ -3,16 +3,25 @@
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 rt_hdr; // rgba16f, linear HDR
 
-layout(set = 0, binding = 0) uniform sampler2D tex_albedo;
-layout(set = 0, binding = 1) uniform sampler2D tex_normal;
-layout(set = 0, binding = 2) uniform sampler2D tex_orm;
-layout(set = 0, binding = 3) uniform sampler2D tex_emissive;
-layout(set = 0, binding = 4) uniform sampler2D tex_worldPos;
-layout(set = 0, binding = 5) uniform sampler2D tex_ao;
-layout(set = 0, binding = 6) uniform sampler2DShadow tex_shadow;
-layout(set = 0, binding = 7) uniform samplerCube tex_irradiance;
+// NVRHI Vulkan binding convention: SRV at binding=slot, sampler at 128+slot, CB at 256+slot.
+layout(set = 0, binding = 0) uniform texture2D tex_albedo;
+layout(set = 0, binding = 128) uniform sampler samp_albedo;
+layout(set = 0, binding = 1) uniform texture2D tex_normal;
+layout(set = 0, binding = 129) uniform sampler samp_normal;
+layout(set = 0, binding = 2) uniform texture2D tex_orm;
+layout(set = 0, binding = 130) uniform sampler samp_orm;
+layout(set = 0, binding = 3) uniform texture2D tex_emissive;
+layout(set = 0, binding = 131) uniform sampler samp_emissive;
+layout(set = 0, binding = 4) uniform texture2D tex_worldPos;
+layout(set = 0, binding = 132) uniform sampler samp_worldPos;
+layout(set = 0, binding = 5) uniform texture2D tex_ao;
+layout(set = 0, binding = 133) uniform sampler samp_ao;
+layout(set = 0, binding = 6) uniform texture2D tex_shadow; // depth (r), manual PCF compare
+layout(set = 0, binding = 134) uniform sampler samp_shadow;
+layout(set = 0, binding = 7) uniform textureCube tex_irradiance;
+layout(set = 0, binding = 135) uniform sampler samp_irradiance;
 
-layout(set = 1, binding = 0) uniform UniformBuffer {
+layout(set = 1, binding = 256) uniform UniformBuffer {
     vec3 camPos;
     float _pad0;
     vec3 lightDir;       // direction the light travels (e.g. (0,-1,0)); L = -lightDir
@@ -55,26 +64,28 @@ float shadowPCF(vec4 worldPos, vec3 N, vec3 L) {
     float bias = ubo.shadowBias * (1.0 - max(dot(N, L), 0.0)) + ubo.shadowBias * 0.5;
     float sum = 0.0;
     for (int x = -1; x <= 1; ++x)
-        for (int y = -1; y <= 1; ++y)
-            sum += texture(tex_shadow, vec3(uv + vec2(float(x), float(y)) * ubo.shadowMapInvSize * 2.0,
-                                             proj.z - bias));
+        for (int y = -1; y <= 1; ++y) {
+            vec2 suv = uv + vec2(float(x), float(y)) * ubo.shadowMapInvSize * 2.0;
+            float d = texture(sampler2D(tex_shadow, samp_shadow), suv).r;
+            sum += (d >= proj.z - bias) ? 1.0 : 0.0;
+        }
     return sum / 9.0; // 3x3 PCF -> soft shadows
 }
 
 void main() {
-    vec4 albedo = texture(tex_albedo, v_uv);
+    vec4 albedo = texture(sampler2D(tex_albedo, samp_albedo), v_uv);
     if (albedo.a < 0.01) { // sky: output clear color
         rt_hdr = vec4(ubo.clearColor.rgb, 1.0);
         return;
     }
-    vec3 worldPos = texture(tex_worldPos, v_uv).xyz;
-    vec3 N = normalize(texture(tex_normal, v_uv).xyz * 2.0 - 1.0);
-    vec3 orm = texture(tex_orm, v_uv).rgb;
+    vec3 worldPos = texture(sampler2D(tex_worldPos, samp_worldPos), v_uv).xyz;
+    vec3 N = normalize(texture(sampler2D(tex_normal, samp_normal), v_uv).xyz * 2.0 - 1.0);
+    vec3 orm = texture(sampler2D(tex_orm, samp_orm), v_uv).rgb;
     float ao = orm.r;
     float roughness = clamp(orm.g, 0.04, 1.0);
     float metallic = clamp(orm.b, 0.0, 1.0);
-    vec3 emissive = texture(tex_emissive, v_uv).rgb;
-    float ssao = texture(tex_ao, v_uv).r;
+    vec3 emissive = texture(sampler2D(tex_emissive, samp_emissive), v_uv).rgb;
+    float ssao = texture(sampler2D(tex_ao, samp_ao), v_uv).r;
 
     vec3 V = normalize(ubo.camPos - worldPos);
     vec3 L = normalize(-ubo.lightDir);
@@ -93,10 +104,10 @@ void main() {
     vec3 direct = (kD * albedo.rgb / PI + specular) * ubo.lightColor * ubo.lightIntensity * NdotL * shadow;
 
     // IBL ambient: irradiance cubemap (diffuse) + simple specular approximation.
-    vec3 irradiance = texture(tex_irradiance, N).rgb;
+    vec3 irradiance = texture(samplerCube(tex_irradiance, samp_irradiance), N).rgb;
     vec3 ambientDiffuse = irradiance * albedo.rgb * (1.0 - metallic);
     vec3 R = reflect(-V, N);
-    vec3 ambientSpec = texture(tex_irradiance, R).rgb * mix(vec3(0.04), albedo.rgb, metallic) * 0.5;
+    vec3 ambientSpec = texture(samplerCube(tex_irradiance, samp_irradiance), R).rgb * mix(vec3(0.04), albedo.rgb, metallic) * 0.5;
     vec3 ambient = (ambientDiffuse + ambientSpec) * ao * ssao * ubo.ambientStrength;
 
     vec3 color = ambient + direct + emissive;

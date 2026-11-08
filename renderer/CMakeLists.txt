@@ -69,16 +69,9 @@ target_include_directories(ignis_renderer PRIVATE "${CMAKE_BINARY_DIR}/generated
 add_dependencies(ignis_renderer ignis_shaders_embedded)
 
 if(IGNIS_WITH_GRAPHICS)
-    # The Vulkan-Hpp dynamic dispatch storage must be emitted in exactly one TU
-    # and linked AFTER nvrhi_vk, so it lives in its own tiny static lib.
-    add_library(ignis_vulkan_dispatch STATIC src/vulkan_dispatch.cpp)
-    target_compile_definitions(ignis_vulkan_dispatch PRIVATE IGNIS_RENDERER_VULKAN)
-    target_link_libraries(ignis_vulkan_dispatch PUBLIC ignis_vulkan_headers ignis_vulkan_lib)
-
-    # nvrhi_vk is NVRHI's separate static target for the Vulkan backend and has
-    # circular references with the core nvrhi lib -> use a rescan link group.
-    target_link_libraries(ignis_renderer PUBLIC
-        "$<LINK_GROUP:RESCAN,nvrhi_vk,nvrhi>" ignis_vulkan_dispatch ignis_vulkan_lib)
+    # NVRHI is built as a shared lib (see Dependencies.cmake): it emits and
+    # initializes the Vulkan-Hpp dispatcher itself, so no manual dispatch TU.
+    target_link_libraries(ignis_renderer PUBLIC nvrhi ignis_vulkan_lib)
     target_compile_definitions(ignis_renderer PUBLIC IGNIS_RENDERER_VULKAN)
 endif()
 

@@ -13,11 +13,17 @@ layout(location = 2) out vec4 rt_orm;
 layout(location = 3) out vec4 rt_emissive;
 layout(location = 4) out vec4 rt_worldPos;
 
-layout(set = 1, binding = 0) uniform sampler2D tex_baseColor;
-layout(set = 1, binding = 1) uniform sampler2D tex_metallicRoughness;
-layout(set = 1, binding = 2) uniform sampler2D tex_normal;
-layout(set = 1, binding = 3) uniform sampler2D tex_occlusion;
-layout(set = 1, binding = 4) uniform sampler2D tex_emissive;
+// NVRHI Vulkan binding convention: SRV at binding=slot, sampler at 128+slot.
+layout(set = 1, binding = 0) uniform texture2D tex_baseColor;
+layout(set = 1, binding = 128) uniform sampler samp_baseColor;
+layout(set = 1, binding = 1) uniform texture2D tex_metallicRoughness;
+layout(set = 1, binding = 129) uniform sampler samp_metallicRoughness;
+layout(set = 1, binding = 2) uniform texture2D tex_normal;
+layout(set = 1, binding = 130) uniform sampler samp_normal;
+layout(set = 1, binding = 3) uniform texture2D tex_occlusion;
+layout(set = 1, binding = 131) uniform sampler samp_occlusion;
+layout(set = 1, binding = 4) uniform texture2D tex_emissive;
+layout(set = 1, binding = 132) uniform sampler samp_emissive;
 
 layout(push_constant) uniform Push {
     mat4 model;
@@ -30,12 +36,12 @@ layout(push_constant) uniform Push {
 
 void main() {
     vec4 base = pc.baseColorFactor;
-    if ((pc.texFlags & 1u) != 0u) base *= texture(tex_baseColor, v_uv);
+    if ((pc.texFlags & 1u) != 0u) base *= texture(sampler2D(tex_baseColor, samp_baseColor), v_uv);
 
     float metallic = pc.metallicRoughness.x;
     float roughness = pc.metallicRoughness.y;
     if ((pc.texFlags & 2u) != 0u) {
-        vec3 mr = texture(tex_metallicRoughness, v_uv).rgb; // glTF: g=roughness, b=metallic
+        vec3 mr = texture(sampler2D(tex_metallicRoughness, samp_metallicRoughness), v_uv).rgb; // glTF: g=roughness, b=metallic
         roughness *= mr.g;
         metallic *= mr.b;
     }
@@ -44,12 +50,12 @@ void main() {
     if ((pc.texFlags & 4u) != 0u) {
         vec3 T = normalize(v_tangent.xyz);
         vec3 B = cross(N, T) * v_tangent.w;
-        vec3 nTS = texture(tex_normal, v_uv).xyz * 2.0 - 1.0;
+        vec3 nTS = texture(sampler2D(tex_normal, samp_normal), v_uv).xyz * 2.0 - 1.0;
         N = normalize(mat3(T, B, N) * nTS);
     }
 
     float ao = 1.0;
-    if ((pc.texFlags & 8u) != 0u) ao = texture(tex_occlusion, v_uv).r;
+    if ((pc.texFlags & 8u) != 0u) ao = texture(sampler2D(tex_occlusion, samp_occlusion), v_uv).r;
 
     rt_albedo = vec4(base.rgb, base.a);
     rt_normal = vec4(N * 0.5 + 0.5, v_tangent.w);

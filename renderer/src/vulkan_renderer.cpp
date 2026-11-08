@@ -18,7 +18,6 @@
 
 #include "ignis/window/window.h"
 #include "shaders_embedded.h"
-#include "vulkan_dispatch.h"
 
 #include <vulkan/vulkan.h>
 #define GLFW_INCLUDE_NONE
@@ -351,7 +350,7 @@ struct VulkanRenderer::Impl {
 
     TextureHandle texWhite, texBlack, texNormalDefault, texIrradianceCube;
 
-    BufferHandle cbLight, cbSSAO, cbBlur, cbTonemap;
+    BufferHandle cbLight, cbSSAO, cbBlur, cbTonemap, cbDummy;
     BindingSetHandle setSSAO, setBlur, setLightingTex, setLightingUBO, setTonemap;
 
     struct GpuPrimitive { u32 firstIndex; u32 indexCount; u32 materialIndex; };
@@ -407,7 +406,7 @@ struct VulkanRenderer::Impl {
         TextureDesc d;
         d.width = static_cast<u32>(src.width);
         d.height = static_cast<u32>(src.height);
-        d.format = src.hdr ? Format::RGBA16_FLOAT : Format::RGBA8_UNORM;
+        d.format = src.hdr ? Format::RGBA32_FLOAT : Format::RGBA8_UNORM;
         d.dimension = TextureDimension::Texture2D;
         d.isShaderResource = true;
         d.debugName = src.name;
@@ -416,9 +415,12 @@ struct VulkanRenderer::Impl {
         auto tex = dev->createTexture(d);
         runOneShot([&](ICommandList* cl) {
             if (src.hdr) {
-                cl->writeTexture(tex, 0, 0, src.hdr_pixels.data(), src.hdr_pixels.size() * sizeof(f32));
+                // writeTexture expects source rows in the texture format: f32 RGBA, rowPitch = w*16.
+                cl->writeTexture(tex, 0, 0, src.hdr_pixels.data(),
+                                 static_cast<size_t>(src.width) * 4u * sizeof(f32));
             } else {
-                cl->writeTexture(tex, 0, 0, src.pixels.data(), src.pixels.size());
+                cl->writeTexture(tex, 0, 0, src.pixels.data(),
+                                 static_cast<size_t>(src.width) * 4u);
             }
         });
         texCache[&src] = tex;
@@ -446,6 +448,8 @@ struct VulkanRenderer::Impl {
         d.byteSize = size;
         d.isConstantBuffer = true;
         d.debugName = name;
+        d.initialState = ResourceStates::ConstantBuffer;
+        d.keepInitialState = true;
         return dev->createBuffer(d);
     }
 
@@ -456,10 +460,13 @@ struct VulkanRenderer::Impl {
         return dev->createBindingLayout(d);
     }
 
+    // NOTE: this NVRHI commit's writeDescriptorTable() only serves bindless layouts
+    // (the regular-layout path is a no-op), so binding sets must be created in one
+    // shot via createBindingSet(), which maps slots correctly.
     BindingSetHandle makeSet(BindingLayoutHandle layout, std::vector<BindingSetItem> items) {
-        auto set = dev->createDescriptorTable(layout);
-        for (auto& it : items) dev->writeDescriptorTable(set, it);
-        return set;
+        BindingSetDesc d;
+        d.bindings = std::move(items);
+        return dev->createBindingSet(d, layout);
     }
 
     static std::vector<BindingLayoutItem> texSlots(u32 count, u32 startSlot) {
@@ -575,14 +582,18 @@ struct VulkanRenderer::Impl {
         sdShadow.reductionType = SamplerReductionType::Comparison;
         sampShadow = dev->createSampler(sdShadow);
 
-        // Binding layouts. GBuffer: set 0 = push constants only, set 1 = material
+        // Binding layouts. GBuffer: set 0 = push constants + a dummy CB (NVRHI
+        // requires at least one non-push item per layout), set 1 = material
         // textures (the shader declares them at set=1, binding=0..4).
-        layoutPushGbuffer = makeLayout({BindingLayoutItem::PushConstants(0, sizeof(GbufferPush))},
+        layoutPushGbuffer = makeLayout({BindingLayoutItem::PushConstants(0, sizeof(GbufferPush)),
+                                        BindingLayoutItem::ConstantBuffer(1)},
                                        ShaderType::Vertex | ShaderType::Pixel);
         layoutMaterial = makeLayout(texSlots(5, 0), ShaderType::Pixel);
-        layoutPushShadow = makeLayout({BindingLayoutItem::PushConstants(0, sizeof(ShadowPush))},
+        layoutPushShadow = makeLayout({BindingLayoutItem::PushConstants(0, sizeof(ShadowPush)),
+                                       BindingLayoutItem::ConstantBuffer(1)},
                                       ShaderType::Vertex);
-        layoutPushLine = makeLayout({BindingLayoutItem::PushConstants(0, sizeof(LinePush))},
+        layoutPushLine = makeLayout({BindingLayoutItem::PushConstants(0, sizeof(LinePush)),
+                                     BindingLayoutItem::ConstantBuffer(1)},
                                     ShaderType::Vertex);
         layoutSSAO = makeLayout({BindingLayoutItem::Texture_SRV(0), BindingLayoutItem::Sampler(0),
                                  BindingLayoutItem::Texture_SRV(1), BindingLayoutItem::Sampler(1),
@@ -640,7 +651,7 @@ struct VulkanRenderer::Impl {
             d.width = 2;
             d.height = 2;
             d.arraySize = 6;
-            d.format = Format::RGBA16_FLOAT;
+            d.format = Format::RGBA32_FLOAT;
             d.dimension = TextureDimension::TextureCube;
             d.isShaderResource = true;
             d.debugName = "irradiance";
@@ -651,11 +662,7 @@ struct VulkanRenderer::Impl {
                 for (u32 face = 0; face < 6; ++face) {
                     const f32 px[2 * 2 * 4] = {0.5f, 0.5f, 0.5f, 1.f, 0.5f, 0.5f, 0.5f, 1.f,
                                                0.5f, 0.5f, 0.5f, 1.f, 0.5f, 0.5f, 0.5f, 1.f};
-                    TextureSlice slice;
-                    slice.arraySlice = face;
-                    slice.width = 2;
-                    slice.height = 2;
-                    cl->writeTexture(texIrradianceCube, slice.arraySlice, 0, px, sizeof(px));
+                    cl->writeTexture(texIrradianceCube, face, 0, px, 2u * 4u * sizeof(f32));
                 }
             });
         }
@@ -674,7 +681,7 @@ struct VulkanRenderer::Impl {
                 math::Vec3 v(dist(rng) * 2.f - 1.f, dist(rng) * 2.f - 1.f, dist(rng));
                 v = glm::normalize(v);
                 f32 scale = 0.1f + 0.9f * (static_cast<f32>(i) / 32.f) * (static_cast<f32>(i) / 32.f);
-                ubo.kernel[i] = math::Vec4(v * scale, 0.f);
+                ubo.kernel[i] = math::Vec4(v, scale); // xyz = dir (normalized), w = scale (shader multiplies by w)
             }
             ubo.radius = 0.5f;
             ubo.power = 1.5f;
@@ -688,13 +695,16 @@ struct VulkanRenderer::Impl {
             d.isVertexBuffer = true;
             d.cpuAccess = CpuAccessMode::Write;
             d.debugName = "lineVB";
+            d.initialState = ResourceStates::VertexBuffer;
+            d.keepInitialState = true;
             lineVB = dev->createBuffer(d);
         }
 
-        // Empty binding sets for push-constants-only layouts.
-        setPushGbuffer = makeSet(layoutPushGbuffer, {});
-        setPushShadow = makeSet(layoutPushShadow, {});
-        setPushLine = makeSet(layoutPushLine, {});
+        // Binding sets for the push-constant layouts (dummy CB at slot 1).
+        cbDummy = createCB(256, "cbDummy");
+        setPushGbuffer = makeSet(layoutPushGbuffer, {BindingSetItem::ConstantBuffer(1, cbDummy)});
+        setPushShadow = makeSet(layoutPushShadow, {BindingSetItem::ConstantBuffer(1, cbDummy)});
+        setPushLine = makeSet(layoutPushLine, {BindingSetItem::ConstantBuffer(1, cbDummy)});
     }
 
     void updateLightingSets() {
@@ -705,7 +715,7 @@ struct VulkanRenderer::Impl {
             BindingSetItem::Texture_SRV(3, texEmissive), BindingSetItem::Sampler(3, sampLinear),
             BindingSetItem::Texture_SRV(4, texWorldPos), BindingSetItem::Sampler(4, sampLinear),
             BindingSetItem::Texture_SRV(5, texSSAOBlurred), BindingSetItem::Sampler(5, sampLinear),
-            BindingSetItem::Texture_SRV(6, texShadow), BindingSetItem::Sampler(6, sampShadow),
+            BindingSetItem::Texture_SRV(6, texShadow), BindingSetItem::Sampler(6, sampNearest),
             BindingSetItem::Texture_SRV(7, texIrradianceCube), BindingSetItem::Sampler(7, sampLinear),
         });
         setLightingUBO = makeSet(layoutLightingUBO, {BindingSetItem::ConstantBuffer(0, cbLight)});
@@ -762,11 +772,15 @@ struct VulkanRenderer::Impl {
         vbDesc.byteSize = vertices.size() * sizeof(f32);
         vbDesc.isVertexBuffer = true;
         vbDesc.debugName = "meshVB";
+        vbDesc.initialState = ResourceStates::VertexBuffer;
+        vbDesc.keepInitialState = true;
         mesh->vb = dev->createBuffer(vbDesc);
         BufferDesc ibDesc;
         ibDesc.byteSize = indices.size() * sizeof(u32);
         ibDesc.isIndexBuffer = true;
         ibDesc.debugName = "meshIB";
+        ibDesc.initialState = ResourceStates::IndexBuffer;
+        ibDesc.keepInitialState = true;
         mesh->ib = dev->createBuffer(ibDesc);
         runOneShot([&](ICommandList* cl) {
             cl->writeBuffer(mesh->vb, vertices.data(), vertices.size() * sizeof(f32));
@@ -822,8 +836,10 @@ VulkanRenderer::~VulkanRenderer() {
 }
 
 bool VulkanRenderer::init(Window* window, std::string& err) {
+    const bool wasOffscreen = impl_ && impl_->offscreen; // init_offscreen sets this first
     impl_ = std::make_unique<Impl>();
     auto& I = *impl_;
+    I.offscreen = wasOffscreen;
     I.window = window;
     I.assets = assets_;
 
@@ -839,9 +855,8 @@ bool VulkanRenderer::init(Window* window, std::string& err) {
     if (!pick_physical(I.instance, window, I.surface, I.physical, I.queueFamily, err)) return false;
     if (!create_logical(I.physical, I.queueFamily, window != nullptr, I.device, I.queue, err)) return false;
 
-    // NVRHI's static Vulkan backend uses the vulkan-hpp dynamic dispatcher,
-    // which must be initialized with our instance/device before createDevice.
-    ignis_init_vulkan_dispatch(reinterpret_cast<void*>(I.instance), reinterpret_cast<void*>(I.device));
+    // NVRHI is built as a shared library here, so it initializes the Vulkan-Hpp
+    // dispatcher itself inside nvrhi::vulkan::createDevice - nothing to do.
 
     u32 w = 1280, h = 720;
     if (window) window->framebuffer_size(w, h);
@@ -938,16 +953,24 @@ void VulkanRenderer::shutdown() {
     if (!impl_) return;
     auto& I = *impl_;
     if (I.dev) I.dev->waitForIdle();
+    // Copy raw handles before destroying the Impl (NVRHI device dies with it).
+    VkDevice device = I.device;
+    VkInstance instance = I.instance;
+    VkSurfaceKHR surface = I.surface;
+    VkSwapchainKHR swapchain = I.swapchain;
+    VkSemaphore imageAvailable = I.imageAvailable;
+    VkSemaphore renderFinished = I.renderFinished;
+    VkFence inFlight = I.inFlight;
     impl_.reset();
-    if (I.device) {
-        if (I.swapchain) vkDestroySwapchainKHR(I.device, I.swapchain, nullptr);
-        if (I.imageAvailable) vkDestroySemaphore(I.device, I.imageAvailable, nullptr);
-        if (I.renderFinished) vkDestroySemaphore(I.device, I.renderFinished, nullptr);
-        if (I.inFlight) vkDestroyFence(I.device, I.inFlight, nullptr);
-        vkDestroyDevice(I.device, nullptr);
+    if (device) {
+        if (swapchain) vkDestroySwapchainKHR(device, swapchain, nullptr);
+        if (imageAvailable) vkDestroySemaphore(device, imageAvailable, nullptr);
+        if (renderFinished) vkDestroySemaphore(device, renderFinished, nullptr);
+        if (inFlight) vkDestroyFence(device, inFlight, nullptr);
+        vkDestroyDevice(device, nullptr);
     }
-    if (I.surface) vkDestroySurfaceKHR(I.instance, I.surface, nullptr);
-    if (I.instance) vkDestroyInstance(I.instance, nullptr);
+    if (surface) vkDestroySurfaceKHR(instance, surface, nullptr);
+    if (instance) vkDestroyInstance(instance, nullptr);
 }
 
 void VulkanRenderer::on_resize(u32 w, u32 h) {
@@ -976,7 +999,7 @@ bool VulkanRenderer::set_environment_hdr(const std::string& path, std::string& e
     d.width = 32;
     d.height = 32;
     d.arraySize = 6;
-    d.format = Format::RGBA16_FLOAT;
+    d.format = Format::RGBA32_FLOAT;
     d.dimension = TextureDimension::TextureCube;
     d.isShaderResource = true;
     d.debugName = "irradiance";
@@ -987,7 +1010,7 @@ bool VulkanRenderer::set_environment_hdr(const std::string& path, std::string& e
     I.runOneShot([&](ICommandList* cl) {
         for (u32 face = 0; face < 6; ++face) {
             cl->writeTexture(I.texIrradianceCube, face, 0,
-                             cube.faces.data() + face * faceFloats, faceFloats * sizeof(f32));
+                             cube.faces.data() + face * faceFloats, 32u * 4u * sizeof(f32));
         }
     });
     I.updateLightingSets();
@@ -1063,17 +1086,20 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
     const math::Mat4 lightProj = ortho_vk(-30.f, 30.f, -30.f, 30.f, 0.1f, 200.f);
     const math::Mat4 lightViewProj = lightProj * lightView;
 
-    // Acquire swapchain image (windowed) before recording.
+    // Acquire swapchain image (windowed) before recording. We wait on a fence
+    // here and present after waitForIdle below, so no semaphores are needed:
+    // NVRHI's executeCommandLists() already submits the command buffer itself,
+    // re-submitting it manually would be a double submit.
     u32 swapIndex = 0;
     if (!I.offscreen && I.swapchain) {
-        vkWaitForFences(I.device, 1, &I.inFlight, VK_TRUE, UINT64_MAX);
-        vkResetFences(I.device, 1, &I.inFlight);
-        VkResult acq = vkAcquireNextImageKHR(I.device, I.swapchain, UINT64_MAX, I.imageAvailable,
-                                             VK_NULL_HANDLE, &swapIndex);
+        VkResult acq = vkAcquireNextImageKHR(I.device, I.swapchain, UINT64_MAX, VK_NULL_HANDLE,
+                                             I.inFlight, &swapIndex);
         if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
             IGNIS_WARN("vkAcquireNextImageKHR failed: {}", static_cast<int>(acq));
             return;
         }
+        vkWaitForFences(I.device, 1, &I.inFlight, VK_TRUE, UINT64_MAX);
+        vkResetFences(I.device, 1, &I.inFlight);
     }
 
     auto cl = I.dev->createCommandList();
@@ -1111,7 +1137,7 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
             math::Vec3 v(dist(rng) * 2.f - 1.f, dist(rng) * 2.f - 1.f, dist(rng));
             v = glm::normalize(v);
             f32 scale = 0.1f + 0.9f * (static_cast<f32>(i) / 32.f) * (static_cast<f32>(i) / 32.f);
-            su.kernel[i] = math::Vec4(v * scale, 0.f);
+            su.kernel[i] = math::Vec4(v, scale); // xyz = dir (normalized), w = scale (shader multiplies by w)
         }
         su.noiseScale = math::Vec2(static_cast<f32>(w) / 4.f, static_cast<f32>(h) / 4.f);
         su.radius = 0.5f;
@@ -1317,24 +1343,11 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
     I.dev->executeCommandLists(&clp, 1);
 
     if (!I.offscreen && I.swapchain) {
-        VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        VkSubmitInfo submit{};
-        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.waitSemaphoreCount = 1;
-        submit.pWaitSemaphores = &I.imageAvailable;
-        submit.pWaitDstStageMask = &waitStage;
-        submit.commandBufferCount = 1;
-        VkCommandBuffer cmdBuf = cl->getNativeObject(ObjectTypes::VK_CommandBuffer);
-        submit.pCommandBuffers = &cmdBuf;
-        submit.signalSemaphoreCount = 1;
-        submit.pSignalSemaphores = &I.renderFinished;
-        vkQueueSubmit(I.queue, 1, &submit, I.inFlight);
-        vkWaitForFences(I.device, 1, &I.inFlight, VK_TRUE, UINT64_MAX);
-
+        // NVRHI submitted the command buffer in executeCommandLists(); wait for
+        // it to finish, then present on the same queue (no extra sync needed).
+        I.dev->waitForIdle();
         VkPresentInfoKHR pi{};
         pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        pi.waitSemaphoreCount = 1;
-        pi.pWaitSemaphores = &I.renderFinished;
         pi.swapchainCount = 1;
         pi.pSwapchains = &I.swapchain;
         pi.pImageIndices = &swapIndex;

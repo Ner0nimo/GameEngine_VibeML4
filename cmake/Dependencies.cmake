@@ -122,7 +122,7 @@ FetchContent_Declare(imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
     GIT_TAG v1.93.0
     GIT_SHALLOW TRUE)
-FetchContent_Declare(vulkan_headers
+FetchContent_Declare(vulkan_headers_ignis
     GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
     GIT_TAG vulkan-sdk-1.4.363.0
     GIT_SHALLOW TRUE)
@@ -134,7 +134,7 @@ FetchContent_Declare(spirv_headers
 # These are only *populated* (sources fetched); their CMake projects are NOT
 # added here. GLFW/NVRHI libraries are added further below only for graphics
 # builds; the rest is consumed header-only.
-foreach(dep glfw nvrhi imgui vulkan_headers spirv_headers)
+foreach(dep glfw nvrhi imgui vulkan_headers_ignis spirv_headers)
     FetchContent_GetProperties(${dep})
     if(NOT ${dep}_POPULATED)
         FetchContent_Populate(${dep})
@@ -151,7 +151,7 @@ target_include_directories(ignis_nvrhi_headers SYSTEM INTERFACE "${nvrhi_SOURCE_
 
 add_library(ignis_vulkan_headers INTERFACE)
 target_include_directories(ignis_vulkan_headers SYSTEM INTERFACE
-    "${vulkan_headers_SOURCE_DIR}/include")
+    "${vulkan_headers_ignis_SOURCE_DIR}/include")
 
 add_library(ignis_spirv_headers INTERFACE)
 target_include_directories(ignis_spirv_headers SYSTEM INTERFACE
@@ -169,9 +169,10 @@ target_include_directories(ignis_imgui SYSTEM PUBLIC
 # Third-party code: no ignis_apply_warnings on purpose.
 
 if(IGNIS_WITH_GRAPHICS)
-    # Vulkan/SPIRV header packages as real CMake targets (NVRHI expects
-    # Vulkan::Headers / SPIRV-Headers targets).
-    add_subdirectory("${vulkan_headers_SOURCE_DIR}" "${vulkan_headers_BINARY_DIR}" EXCLUDE_FROM_ALL)
+    # NVRHI fetches its own pinned Vulkan-Headers (its shared-build dispatch init
+    # needs the header version it was written against). We only provide the
+    # SPIRV-Headers target; our own code uses vulkan headers via the
+    # ignis_vulkan_headers interface target (source include dir).
     add_subdirectory("${spirv_headers_SOURCE_DIR}" "${spirv_headers_BINARY_DIR}" EXCLUDE_FROM_ALL)
 
     # Real GLFW library (needs X11/Wayland dev packages on Linux)
@@ -190,6 +191,8 @@ if(IGNIS_WITH_GRAPHICS)
     set(NVRHI_WITH_DX11 OFF CACHE BOOL "" FORCE)
     set(NVRHI_WITH_DX12 OFF CACHE BOOL "" FORCE)
     set(NVRHI_WITH_VULKAN ON CACHE BOOL "" FORCE)
+    set(NVRHI_FETCH_VULKAN_HEADERS ON CACHE BOOL "" FORCE)
+    set(NVRHI_WITH_VALIDATION OFF CACHE BOOL "" FORCE)
     set(NVRHI_WITH_OPENGL OFF CACHE BOOL "" FORCE)
     set(NVRHI_WITH_METAL OFF CACHE BOOL "" FORCE)
     set(NVRHI_WITH_DEBUG_LAYER OFF CACHE BOOL "" FORCE)
@@ -199,14 +202,15 @@ if(IGNIS_WITH_GRAPHICS)
     set(NVRHI_BUILD_DOCS OFF CACHE BOOL "" FORCE)
     set(NVRHI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(NVRHI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(NVRHI_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+    # Shared build: NVRHI then emits and initializes the Vulkan-Hpp dynamic
+    # dispatcher inside its own .so (vulkan-device.cpp), avoiding static-link
+    # dispatcher/ODR pitfalls on Linux.
+    set(NVRHI_BUILD_SHARED ON CACHE BOOL "" FORCE)
+    set(NVRHI_BUILD_SHARED_LIBRARY ON CACHE BOOL "" FORCE)
     add_subdirectory("${nvrhi_SOURCE_DIR}" "${nvrhi_BINARY_DIR}" EXCLUDE_FROM_ALL)
     # Ship NVRHI without its internal asserts (Release-style); our own targets
     # keep full warnings-as-errors.
     target_compile_definitions(nvrhi PRIVATE NDEBUG)
-    if(TARGET nvrhi_vk)
-        target_compile_definitions(nvrhi_vk PRIVATE NDEBUG)
-    endif()
 
     # ImGui backends for GLFW + raw Vulkan (used by the editor overlay)
     target_sources(ignis_imgui PRIVATE
