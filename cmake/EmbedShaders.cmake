@@ -10,6 +10,10 @@ string(APPEND CONTENT "namespace ignis::shaders {\n\n")
 set(ENTRIES "")
 foreach(f ${SPV_FILES})
     get_filename_component(name "${f}" NAME_WE) # e.g. gbuffer_vert
+    file(SIZE "${f}" SPV_SIZE)
+    if(SPV_SIZE EQUAL 0)
+        continue() # empty placeholder (no glslangValidator) - skip
+    endif()
     file(READ "${f}" HEX HEX)
     # Group 8 hex chars (4 bytes) into one uint32_t SPIR-V word, little-endian:
     # bytes b0 b1 b2 b3 -> word 0x b3b2b1b0. CMake regex has no {n}, so match
