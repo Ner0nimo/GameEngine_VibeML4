@@ -1,5 +1,8 @@
-// Editor application: window + Vulkan renderer + ImGui overlay (hierarchy,
-// inspector, play/pause, save) + AI-agent command interface (--commands).
+// Editor application: window + Vulkan renderer + ImGui overlay (menu bar,
+// toolbar, hierarchy with filter + drag&drop reparenting, inspector, console
+// with level filters + JSON command input, asset browser, stats graph, status
+// bar, viewport overlay, transform gizmo with space/snap) + play-mode
+// snapshot/restore + AI-agent command interface (--commands).
 // The ImGui pass is recorded on the swapchain image after the scene render
 // (render pass with loadOp=LOAD, initial layout PRESENT_SRC_KHR) and before
 // present().
@@ -26,6 +29,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -80,11 +85,12 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
         IGNIS_ERROR("{}", r.error());
         return 1;
     }
+    scene_path_ = scene_path;
     if (auto r = init_imgui_ui(); !r.ok()) {
         IGNIS_ERROR("ImGui UI init failed: {}", r.error());
         return 1;
     }
-    main_loop(scene_path);
+    main_loop();
     shutdown_ui();
     IGNIS_INFO("editor shut down cleanly");
     return 0;
@@ -469,21 +475,139 @@ void EditorApp::handle_viewport_input(Camera& camera, EntityId cam_entity, f32 d
     left_clicked_ = lmb;
 }
 
-void EditorApp::handle_shortcuts(const std::string& scene_path) {
+void EditorApp::handle_shortcuts() {
     ImGuiIO& io = ImGui::GetIO();
     if (io.WantCaptureKeyboard) return;
+    const bool has_sel = selected_ != NULL_ENTITY && scene_->world().alive(selected_);
     if (ImGui::IsKeyPressed(ImGuiKey_W, false)) gizmo_op_ = GizmoOp::Translate;
     if (ImGui::IsKeyPressed(ImGuiKey_E, false)) gizmo_op_ = GizmoOp::Rotate;
     if (ImGui::IsKeyPressed(ImGuiKey_R, false)) gizmo_op_ = GizmoOp::Scale;
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && selected_ != NULL_ENTITY &&
-        scene_->world().alive(selected_)) {
-        delete_entity(selected_);
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && has_sel) delete_entity(selected_);
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false) && has_sel) duplicate_entity(selected_);
+    if (ImGui::IsKeyPressed(ImGuiKey_F, false) && has_sel) frame_selected();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) save_scene();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_N, false)) new_scene();
+    if (ImGui::IsKeyPressed(ImGuiKey_P, false)) {
+        if (playing_) stop_play();
+        else start_play();
     }
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
-        if (auto r = scene_->save_to_file(scene_path); r.ok()) IGNIS_INFO("scene saved to {}", scene_path);
-        else IGNIS_ERROR("{}", r.error());
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) window_->request_close();
+}
+
+// --- scene actions (shared by menu bar, toolbar and keyboard shortcuts) ------
+
+void EditorApp::update_window_title() {
+    glfwSetWindowTitle(window_->handle(),
+                       ("Ignis Editor - " + scene_->name() + "  [" + scene_path_ + "]").c_str());
+}
+
+void EditorApp::save_scene() {
+    if (auto r = scene_->save_to_file(scene_path_); r.ok()) {
+        IGNIS_INFO("scene saved to {}", scene_path_);
+        update_window_title();
+    } else {
+        IGNIS_ERROR("{}", r.error());
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_P, false)) playing_ = !playing_;
+}
+
+void EditorApp::new_scene() {
+    stop_play();
+    nlohmann::json empty;
+    empty["name"] = "Untitled";
+    empty["entities"] = nlohmann::json::array();
+    empty["prefabs"] = nlohmann::json::object();
+    if (auto r = scene_->load_json(empty); r.ok()) {
+        selected_ = NULL_ENTITY;
+        scene_path_ = "scenes/untitled.scene.json"; // where Ctrl+S will write
+        update_window_title();
+        IGNIS_INFO("new empty scene");
+    } else {
+        IGNIS_ERROR("{}", r.error());
+    }
+}
+
+void EditorApp::open_scene(const std::string& path) {
+    stop_play();
+    if (auto r = scene_->load_file(path); r.ok()) {
+        selected_ = NULL_ENTITY;
+        scene_path_ = path;
+        update_window_title();
+        IGNIS_INFO("opened scene {}", path);
+    } else {
+        IGNIS_ERROR("{}", r.error());
+    }
+}
+
+void EditorApp::reload_scene() {
+    stop_play();
+    if (auto r = scene_->load_file(scene_path_); r.ok()) IGNIS_INFO("scene reloaded from {}", scene_path_);
+    else IGNIS_ERROR("{}", r.error());
+}
+
+void EditorApp::start_play() {
+    if (playing_) return;
+    // Snapshot the live scene so stop_play() can restore it (unsaved edits
+    // survive a play session; the file on disk is never touched here).
+    play_snapshot_ = scene_->serialize();
+    has_snapshot_ = true;
+    playing_ = true;
+    IGNIS_INFO("play: snapshot taken ({} entities)",
+               static_cast<unsigned long long>(scene_->world().entity_count()));
+}
+
+void EditorApp::stop_play() {
+    if (!playing_ && !has_snapshot_) return;
+    playing_ = false;
+    if (has_snapshot_) {
+        if (auto r = scene_->load_json(play_snapshot_); r.ok())
+            IGNIS_INFO("stop: restored pre-play scene state");
+        else
+            IGNIS_ERROR("stop: restore failed: {}", r.error());
+        has_snapshot_ = false;
+    }
+    if (selected_ != NULL_ENTITY && !scene_->world().alive(selected_)) selected_ = NULL_ENTITY;
+}
+
+EntityId EditorApp::create_gameobject(const std::string& kind) {
+    World& w = scene_->world();
+    EntityId e = w.create_entity(kind);
+    w.emplace<TransformComponent>(e);
+    if (kind == "Cube") {
+        w.emplace<MeshRendererComponent>(e).model_path = "assets/cube.gltf";
+    } else if (kind == "Camera") {
+        w.emplace<CameraComponent>(e);
+    } else if (kind == "Directional Light") {
+        w.emplace<DirectionalLightComponent>(e);
+    } else if (kind == "Point Light") {
+        w.emplace<PointLightComponent>(e);
+    } else if (kind == "Audio Source") {
+        w.emplace<AudioSourceComponent>(e);
+    }
+    selected_ = e;
+    IGNIS_INFO("created '{}' (#%llu)", kind, static_cast<unsigned long long>(e));
+    return e;
+}
+
+void EditorApp::frame_selected() {
+    if (selected_ == NULL_ENTITY || !scene_->world().alive(selected_)) return;
+    const EntityId cam = find_active_camera();
+    if (cam == NULL_ENTITY || !scene_->world().alive(cam)) return;
+    auto* tc = scene_->world().get<TransformComponent>(cam);
+    if (!tc) return;
+    if (!scene_->world().get<TransformComponent>(selected_)) return;
+    // Aim the camera at the selected entity's world position, keeping distance.
+    const math::Mat4 wm = world_matrix(scene_->world(), selected_);
+    const math::Vec3 target{static_cast<f32>(wm[3][0]), static_cast<f32>(wm[3][1]),
+                            static_cast<f32>(wm[3][2])};
+    const math::Vec3 to_target = target - tc->position;
+    const f32 dist = glm::max(glm::length(to_target), 3.f);
+    const math::Vec3 dir = glm::length(to_target) > 1e-5f ? glm::normalize(to_target)
+                                                          : math::Vec3(0.f, 0.f, -1.f);
+    cam_yaw_ = std::atan2(-dir.x, -dir.z);
+    cam_pitch_ = glm::clamp(std::asin(glm::clamp(dir.y, -1.f, 1.f)), -1.55f, 1.55f);
+    tc->position = target - dir * dist;
+    tc->rotation = glm::angleAxis(cam_yaw_, math::Vec3(0.f, 1.f, 0.f)) *
+                   glm::angleAxis(cam_pitch_, math::Vec3(1.f, 0.f, 0.f));
 }
 
 void EditorApp::delete_entity(EntityId e) {
@@ -512,28 +636,40 @@ void EditorApp::duplicate_entity(EntityId e) {
     selected_ = copy;
 }
 
-void EditorApp::reload_scene(const std::string& scene_path) {
-    playing_ = false;
-    selected_ = NULL_ENTITY;
-    if (auto r = scene_->load_file(scene_path); r.ok()) IGNIS_INFO("scene reloaded from {}", scene_path);
-    else IGNIS_ERROR("{}", r.error());
+void EditorApp::run_console_command(const std::string& line) {
+    if (line.empty()) return;
+    try {
+        const CommandResult r = commands_->execute(nlohmann::json::parse(line));
+        // Results flow into the in-app console through the logger listener.
+        if (r.ok) IGNIS_INFO("cmd: {} ({})", r.message, "ok");
+        else IGNIS_ERROR("cmd failed: {}", r.message);
+    } catch (const std::exception& e) {
+        IGNIS_ERROR("bad command JSON: {}", e.what());
+    }
 }
 
-void EditorApp::draw_menu_bar(const std::string& scene_path) {
+void EditorApp::draw_menu_bar() {
     if (!ImGui::BeginMainMenuBar()) return;
     if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("Save", "Ctrl+S")) {
-            if (auto r = scene_->save_to_file(scene_path); r.ok()) IGNIS_INFO("scene saved to {}", scene_path);
-            else IGNIS_ERROR("{}", r.error());
+        if (ImGui::MenuItem("New scene", "Ctrl+N")) new_scene();
+        draw_open_scene_menu();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Save", "Ctrl+S")) save_scene();
+        if (ImGui::MenuItem("Save as...")) {
+            save_as_open_ = true;
+            std::snprintf(save_as_buf_, sizeof(save_as_buf_), "%s", scene_path_.c_str());
         }
-        if (ImGui::MenuItem("Reload scene")) reload_scene(scene_path);
+        if (ImGui::MenuItem("Reload from file")) reload_scene();
+        ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Esc")) window_->request_close();
         ImGui::EndMenu();
     }
+    draw_gameobject_menu();
     if (ImGui::BeginMenu("Edit")) {
         const bool has_sel = selected_ != NULL_ENTITY && scene_->world().alive(selected_);
         if (ImGui::MenuItem("Delete selected", "Del", false, has_sel)) delete_entity(selected_);
-        if (ImGui::MenuItem("Duplicate selected", nullptr, false, has_sel)) duplicate_entity(selected_);
+        if (ImGui::MenuItem("Duplicate selected", "Ctrl+D", false, has_sel)) duplicate_entity(selected_);
+        if (ImGui::MenuItem("Frame selected", "F", false, has_sel)) frame_selected();
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View")) {
@@ -541,19 +677,115 @@ void EditorApp::draw_menu_bar(const std::string& scene_path) {
         ImGui::MenuItem("Inspector", nullptr, &show_inspector_);
         ImGui::MenuItem("Bottom panel", nullptr, &show_bottom_);
         ImGui::MenuItem("Status bar", nullptr, &show_statusbar_);
+        ImGui::MenuItem("Viewport overlay", nullptr, &show_overlay_);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Run")) {
-        if (ImGui::MenuItem(playing_ ? "Pause" : "Play", "P")) playing_ = !playing_;
-        if (ImGui::MenuItem("Stop (reload)", nullptr, false, true)) reload_scene(scene_path);
+        if (ImGui::MenuItem(playing_ ? "Pause" : "Play", "P")) {
+            if (playing_) stop_play();
+            else start_play();
+        }
+        if (ImGui::MenuItem("Stop (restore pre-play state)", nullptr, false, playing_)) stop_play();
         ImGui::EndMenu();
     }
+    draw_help_menu();
     ImGui::TextDisabled("%s", playing_ ? "[playing]" : "[paused]");
     ImGui::EndMainMenuBar();
 }
 
-void EditorApp::draw_toolbar(const std::string& scene_path) {
-    (void)scene_path;
+void EditorApp::draw_open_scene_menu() {
+    if (!ImGui::BeginMenu("Open scene")) return;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::vector<fs::path> files;
+    if (fs::is_directory("scenes", ec))
+        for (const auto& entry : fs::directory_iterator("scenes", ec))
+            if (entry.path().extension() == ".json") files.push_back(entry.path());
+    std::sort(files.begin(), files.end());
+    if (files.empty()) {
+        ImGui::MenuItem("(no scenes in scenes/)", nullptr, false, false);
+    } else {
+        for (const auto& f : files)
+            if (ImGui::MenuItem(f.filename().string().c_str())) open_scene(f.generic_string());
+    }
+    ImGui::EndMenu();
+}
+
+void EditorApp::draw_gameobject_menu() {
+    if (!ImGui::BeginMenu("GameObject")) return;
+    static const char* kinds[] = {"Empty", "Cube", "Camera", "Directional Light", "Point Light",
+                                  "Audio Source"};
+    for (const char* k : kinds)
+        if (ImGui::MenuItem(k)) create_gameobject(k);
+    const std::vector<std::string> prefabs = scene_->prefab_names();
+    if (!prefabs.empty()) {
+        ImGui::Separator();
+        for (const auto& p : prefabs) {
+            if (ImGui::MenuItem(("Prefab: " + p).c_str())) {
+                const EntityId e = scene_->spawn_prefab(p);
+                if (e != NULL_ENTITY) {
+                    selected_ = e;
+                    IGNIS_INFO("spawned prefab '{}' (#%llu)", p, static_cast<unsigned long long>(e));
+                }
+            }
+        }
+    }
+    ImGui::EndMenu();
+}
+
+void EditorApp::draw_help_menu() {
+    if (!ImGui::BeginMenu("Help")) return;
+    if (ImGui::MenuItem("Shortcuts & about")) show_help_ = true;
+    ImGui::EndMenu();
+}
+
+void EditorApp::draw_help_window() {
+    if (!show_help_) return;
+    if (ImGui::Begin("Help - Ignis Editor", &show_help_)) {
+        ImGui::Text("Ignis Editor");
+        ImGui::Separator();
+        ImGui::Text("Viewport: RMB drag = look, WASDQE = fly, LMB = select entity");
+        ImGui::Text("Gizmo:    W translate, E rotate, R scale; toolbar = space + snap");
+        ImGui::Text("Edit:     Del delete, Ctrl+D duplicate, F frame selected");
+        ImGui::Text("File:     Ctrl+N new scene, Ctrl+S save, Esc quit");
+        ImGui::Text("Run:      P play/pause; Stop restores the pre-play scene state");
+        ImGui::Text("Console:  filter by level/text; Enter runs a JSON agent command");
+        ImGui::Text("Assets:   select a file, 'Use on selected' assigns it to the entity");
+        ImGui::Separator();
+        ImGui::Text("scene: %s  [%s]", scene_->name().c_str(), scene_path_.c_str());
+        ImGui::Text("entities: %llu   prefabs: %zu",
+                    static_cast<unsigned long long>(scene_->world().entity_count()),
+                    scene_->prefab_names().size());
+    }
+    ImGui::End();
+}
+
+void EditorApp::draw_save_as_modal() {
+    if (!save_as_open_) return;
+    ImGui::OpenPopup("Save scene as");
+    if (ImGui::BeginPopupModal("Save scene as", &save_as_open_, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("path", save_as_buf_, sizeof(save_as_buf_));
+        if (ImGui::Button("Save")) {
+            if (auto r = scene_->save_to_file(save_as_buf_); r.ok()) {
+                scene_path_ = save_as_buf_;
+                update_window_title();
+                IGNIS_INFO("scene saved to {}", scene_path_);
+                save_as_open_ = false;
+                ImGui::CloseCurrentPopup();
+            } else {
+                IGNIS_ERROR("{}", r.error());
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            save_as_open_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void EditorApp::draw_toolbar() {
     ImGui::SetNextWindowPos(ImVec2(0.f, ImGui::GetFrameHeight()), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(ImGui::GetMainViewport()->WorkSize.x, 0.f));
     ImGui::Begin("##toolbar", nullptr,
@@ -575,11 +807,33 @@ void EditorApp::draw_toolbar(const std::string& scene_path) {
     ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
-    if (ImGui::Button(playing_ ? "||" : ">")) playing_ = !playing_;
+    if (ImGui::SmallButton(gizmo_world_space_ ? "World" : "Local")) gizmo_world_space_ = !gizmo_world_space_;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gizmo coordinate space (local axes vs world axes)");
+    ImGui::SameLine();
+    if (ImGui::SmallButton(gizmo_snap_ ? "Snap: on" : "Snap: off")) gizmo_snap_ = !gizmo_snap_;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Snap gizmo drags to the step below");
+    ImGui::SameLine();
+    if (gizmo_snap_) {
+        f32* step = gizmo_op_ == GizmoOp::Translate ? &snap_translate_
+                  : gizmo_op_ == GizmoOp::Rotate ? &snap_rotate_deg_
+                  : &snap_scale_;
+        ImGui::SetNextItemWidth(80.f);
+        ImGui::DragFloat("##snapstep", step, 0.01f, 0.001f, 10000.f,
+                         gizmo_op_ == GizmoOp::Rotate ? "%.1f deg" : "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Snap step for the current gizmo op (degrees for rotate)");
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    if (ImGui::Button(playing_ ? "||" : ">")) {
+        if (playing_) stop_play();
+        else start_play();
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s (P)", playing_ ? "Pause" : "Play");
     ImGui::SameLine();
-    if (ImGui::Button("[]")) reload_scene(scene_path);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop and reload scene");
+    if (ImGui::Button("[]")) stop_play();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop and restore the pre-play scene state");
     ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
@@ -600,6 +854,21 @@ void EditorApp::draw_hierarchy_node(EntityId e) {
     if (selected_ == e) flags |= ImGuiTreeNodeFlags_Selected;
     const bool open = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<intptr_t>(e)), flags,
                                         "%s", w.name_of(e).c_str());
+    // Drag & drop reparenting: World::set_parent rejects cycles, so a drop on
+    // a descendant is a no-op rather than corruption.
+    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+        ImGui::SetDragDropPayload("IGNIS_ENTITY", &e, sizeof(e));
+        ImGui::Text("%s", w.name_of(e).c_str());
+        ImGui::EndDragDropSource();
+    }
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("IGNIS_ENTITY")) {
+            const EntityId child = *static_cast<const EntityId*>(payload->Data);
+            if (child != e && w.set_parent(child, e))
+                IGNIS_INFO("reparented '{}' under '{}'", w.name_of(child).c_str(), w.name_of(e).c_str());
+        }
+        ImGui::EndDragDropTarget();
+    }
     if (ImGui::IsItemClicked()) selected_ = e;
     if (ImGui::BeginPopupContextItem()) {
         if (ImGui::MenuItem("Create child")) {
@@ -631,16 +900,38 @@ void EditorApp::draw_hierarchy() {
     }
     World& w = scene_->world();
     if (ImGui::BeginPopupContextWindow("hierarchy_bg")) {
-        if (ImGui::MenuItem("Create empty entity")) {
-            selected_ = w.create_entity("New Entity");
+        if (ImGui::BeginMenu("Create")) {
+            static const char* kinds[] = {"Empty", "Cube", "Camera", "Directional Light",
+                                          "Point Light", "Audio Source"};
+            for (const char* k : kinds)
+                if (ImGui::MenuItem(k)) create_gameobject(k);
+            ImGui::EndMenu();
         }
         ImGui::EndPopup();
     }
-    std::vector<EntityId> roots;
-    for (EntityId e : w.all_entities())
-        if (w.parent_of(e) == NULL_ENTITY) roots.push_back(e);
-    std::sort(roots.begin(), roots.end());
-    for (EntityId e : roots) draw_hierarchy_node(e);
+    ImGui::InputTextWithHint("##hier_filter", "filter...", hierarchy_filter_, sizeof(hierarchy_filter_));
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Clear")) hierarchy_filter_[0] = '\0';
+    const std::string filter = hierarchy_filter_;
+    if (!filter.empty()) {
+        // Flat list of case-insensitive name matches.
+        auto lower = [](std::string s) {
+            for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        };
+        const std::string f = lower(filter);
+        for (EntityId e : w.all_entities()) {
+            const std::string name = w.name_of(e);
+            if (lower(name).find(f) == std::string::npos) continue;
+            if (ImGui::Selectable(name.c_str(), selected_ == e)) selected_ = e;
+        }
+    } else {
+        std::vector<EntityId> roots;
+        for (EntityId e : w.all_entities())
+            if (w.parent_of(e) == NULL_ENTITY) roots.push_back(e);
+        std::sort(roots.begin(), roots.end());
+        for (EntityId e : roots) draw_hierarchy_node(e);
+    }
 
     // Rename modal.
     if (rename_target_ != NULL_ENTITY && w.alive(rename_target_)) {
@@ -749,6 +1040,24 @@ void EditorApp::draw_inspector() {
 }
 
 void EditorApp::draw_console() {
+    // Per-level toggle buttons with live counts.
+    u32 counts[6] = {0, 0, 0, 0, 0, 0};
+    {
+        std::lock_guard lock(console_mutex_);
+        for (const auto& [level, msg] : console_) ++counts[static_cast<u8>(level)];
+    }
+    for (u8 i = 0; i < 6; ++i) {
+        const LogLevel level = static_cast<LogLevel>(i);
+        if (i > 0) ImGui::SameLine();
+        char label[40];
+        std::snprintf(label, sizeof(label), "%s %u", to_string(level), counts[i]);
+        const bool on = log_show_[i];
+        if (!on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+        if (ImGui::SmallButton(label)) log_show_[i] = !log_show_[i];
+        if (!on) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("show/hide %s messages", to_string(level));
+    }
+    ImGui::SameLine();
     ImGui::InputText("filter", console_filter_, sizeof(console_filter_));
     ImGui::SameLine();
     if (ImGui::SmallButton("Clear")) {
@@ -758,22 +1067,50 @@ void EditorApp::draw_console() {
     ImGui::SameLine();
     ImGui::Checkbox("auto-scroll", &console_autoscroll_);
     const std::string filter = console_filter_;
-    ImGui::BeginChild("##console_scroll", ImVec2(0.f, 0.f), ImGuiChildFlags_Borders);
+    ImGui::BeginChild("##console_scroll", ImVec2(0.f, -30.f), ImGuiChildFlags_Borders);
     std::lock_guard lock(console_mutex_);
     for (const auto& [level, msg] : console_) {
+        const u8 idx = static_cast<u8>(level);
+        if (idx < 6 && !log_show_[idx]) continue;
         if (!filter.empty() && msg.find(filter) == std::string::npos) continue;
         ImGui::TextColored(log_color(level), "[%s] %s", to_string(level), msg.c_str());
     }
     if (console_autoscroll_) ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
+    draw_console_input();
+}
+
+void EditorApp::draw_console_input() {
+    ImGui::PushItemWidth(-1.f);
+    const bool run = ImGui::InputTextWithHint("##cmd", "{\"cmd\": \"create_entity\", \"name\": \"Bot\"}  (Enter = run agent command)",
+                                              console_input_, sizeof(console_input_),
+                                              ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::PopItemWidth();
+    if (run) {
+        run_console_command(console_input_);
+        console_input_[0] = '\0';
+        ImGui::SetKeyboardFocusHere(-1); // keep focus in the input for the next command
+    }
 }
 
 void EditorApp::draw_asset_browser() {
     namespace fs = std::filesystem;
-    ImGui::TextDisabled("assets/  scripts/  (click a file to select)");
+    ImGui::TextDisabled("assets/  scripts/  scenes/  (click a file to select)");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Copy path")) {
+        if (!selected_asset_.empty()) {
+            ImGui::SetClipboardText(selected_asset_.c_str());
+            IGNIS_INFO("copied path '{}'", selected_asset_);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Use on selected")) assign_selected_asset();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Assign the selected file to the selected entity "
+                          "(.gltf->MeshRenderer, audio->AudioSource, .lua->Script)");
     ImGui::Separator();
     ImGui::BeginChild("##assets_scroll");
-    const fs::path roots[] = {"assets", "scripts"};
+    const fs::path roots[] = {"assets", "scripts", "scenes"};
     std::function<void(const fs::path&, const fs::path&)> draw_dir = [&](const fs::path& dir, const fs::path& root) {
         std::error_code ec;
         if (!fs::is_directory(dir, ec)) return;
@@ -802,17 +1139,88 @@ void EditorApp::draw_asset_browser() {
     if (!selected_asset_.empty()) ImGui::Text("selected: %s", selected_asset_.c_str());
 }
 
-void EditorApp::draw_stats(f32 dt) {
-    const RenderStats st = renderer_->stats();
-    ImGui::Text("draw calls: %u", st.draw_calls);
-    ImGui::Text("triangles:  %u", st.triangles);
-    ImGui::Text("frame:      %.2f ms (%.0f fps)", static_cast<double>(dt * 1000.f),
-                static_cast<double>(dt > 0.f ? 1.f / dt : 0.f));
-    ImGui::Text("entities:   %llu", static_cast<unsigned long long>(scene_->world().entity_count()));
-    ImGui::Text("scene:      %s", scene_->name().c_str());
+// Assign the selected asset file to the selected entity, by extension. Adds
+// the target component with defaults if the entity doesn't have it yet.
+void EditorApp::assign_selected_asset() {
+    namespace fs = std::filesystem;
+    if (selected_asset_.empty()) {
+        IGNIS_WARN("no asset selected");
+        return;
+    }
+    World& w = scene_->world();
+    if (selected_ == NULL_ENTITY || !w.alive(selected_)) {
+        IGNIS_WARN("no entity selected");
+        return;
+    }
+    const std::string ext = fs::path(selected_asset_).extension().string();
+    const ComponentTypeInfo* info = nullptr;
+    if (ext == ".gltf" || ext == ".glb") info = w.registry().find_by_name("MeshRenderer");
+    else if (ext == ".wav" || ext == ".mp3" || ext == ".ogg" || ext == ".flac")
+        info = w.registry().find_by_name("AudioSource");
+    else if (ext == ".lua") info = w.registry().find_by_name("Script");
+    else {
+        IGNIS_WARN("don't know how to assign '{}' to an entity", selected_asset_);
+        return;
+    }
+    if (!info) {
+        IGNIS_WARN("target component not registered");
+        return;
+    }
+    bool has = false;
+    for (const auto& [type, storage] : w.storages())
+        if (type == info->type) { has = storage->has(selected_); break; }
+    if (!has) info->add_default(w, selected_);
+    if (ext == ".gltf" || ext == ".glb")
+        w.get<MeshRendererComponent>(selected_)->model_path = selected_asset_;
+    else if (ext == ".lua")
+        w.get<ScriptComponent>(selected_)->path = selected_asset_;
+    else
+        w.get<AudioSourceComponent>(selected_)->path = selected_asset_;
+    IGNIS_INFO("assigned '{}' to '{}'", selected_asset_, w.name_of(selected_));
 }
 
-void EditorApp::draw_bottom_panel() {
+void EditorApp::draw_stats(f32 dt) {
+    const RenderStats st = renderer_->stats();
+    const FramebufferSize fb = window_->framebuffer_size();
+    if (dt > 0.f) {
+        fps_history_.push_back(1.f / dt);
+        if (fps_history_.size() > 240) fps_history_.erase(fps_history_.begin());
+    }
+    f32 avg = 0.f, mn = 0.f, mx = 0.f;
+    if (!fps_history_.empty()) {
+        mn = 1e30f;
+        for (const f32 f : fps_history_) {
+            avg += f;
+            mn = std::min(mn, f);
+            mx = std::max(mx, f);
+        }
+        avg /= static_cast<f32>(fps_history_.size());
+    }
+    ImGui::Text("frame:      %.2f ms (%.1f fps)", static_cast<double>(dt * 1000.f),
+                static_cast<double>(dt > 0.f ? 1.f / dt : 0.f));
+    if (!fps_history_.empty()) {
+        ImGui::Text("fps avg %.1f  min %.1f  max %.1f", static_cast<double>(avg),
+                    static_cast<double>(mn), static_cast<double>(mx));
+        ImGui::PlotLines("##fps_graph", fps_history_.data(), static_cast<int>(fps_history_.size()),
+                         0, "fps", 0.f, 0.f, ImVec2(-1.f, 60.f));
+    }
+    ImGui::Text("draw calls: %u", st.draw_calls);
+    ImGui::Text("triangles:  %u", st.triangles);
+    u64 components = 0;
+    for (const auto& [type, storage] : scene_->world().storages()) {
+        (void)type;
+        components += storage->entities().size();
+    }
+    ImGui::Text("entities:   %llu (%llu components)",
+                static_cast<unsigned long long>(scene_->world().entity_count()),
+                static_cast<unsigned long long>(components));
+    ImGui::Text("resolution: %u x %u", fb.width, fb.height);
+    ImGui::Text("scene:      %s (%s)", scene_->name().c_str(),
+                playing_ ? "playing" : "paused");
+    ImGui::Text("prefabs:    %zu", scene_->prefab_names().size());
+}
+
+void EditorApp::draw_bottom_panel(f32 dt) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - 240.f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(560.f, 220.f), ImGuiCond_FirstUseEver);
@@ -823,7 +1231,7 @@ void EditorApp::draw_bottom_panel() {
     if (ImGui::BeginTabBar("##bottom_tabs")) {
         if (ImGui::BeginTabItem("Console")) { bottom_tab_ = 0; draw_console(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Assets")) { bottom_tab_ = 1; draw_asset_browser(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Stats")) { bottom_tab_ = 2; draw_stats(0.f); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Stats")) { bottom_tab_ = 2; draw_stats(dt); ImGui::EndTabItem(); }
         ImGui::EndTabBar();
     }
     ImGui::End();
@@ -861,7 +1269,16 @@ void EditorApp::draw_viewport_gizmo(const Camera& camera, f32 aspect) {
     const ImGuizmo::OPERATION op = gizmo_op_ == GizmoOp::Translate ? ImGuizmo::TRANSLATE
                                    : gizmo_op_ == GizmoOp::Rotate ? ImGuizmo::ROTATE
                                    : ImGuizmo::SCALE;
-    if (ImGuizmo::Manipulate(&view[0][0], &proj[0][0], op, ImGuizmo::LOCAL, &model[0][0])) {
+    const ImGuizmo::MODE mode = gizmo_world_space_ ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
+    f32 snap = 0.f;
+    const f32* snap_ptr = nullptr;
+    if (gizmo_snap_) {
+        snap = gizmo_op_ == GizmoOp::Translate ? snap_translate_
+             : gizmo_op_ == GizmoOp::Rotate ? glm::radians(snap_rotate_deg_)
+             : snap_scale_;
+        snap_ptr = &snap;
+    }
+    if (ImGuizmo::Manipulate(&view[0][0], &proj[0][0], op, mode, &model[0][0], nullptr, snap_ptr)) {
         f32 t[3] = {0.f, 0.f, 0.f}, r[4] = {0.f, 0.f, 0.f, 1.f}, s[3] = {1.f, 1.f, 1.f};
         ImGuizmo::DecomposeMatrixToComponents(&model[0][0], t, r, s);
         tc->position = {t[0], t[1], t[2]};
@@ -870,7 +1287,28 @@ void EditorApp::draw_viewport_gizmo(const Camera& camera, f32 aspect) {
     }
 }
 
-void EditorApp::main_loop(const std::string& scene_path) {
+void EditorApp::draw_viewport_overlay(const Camera& camera, EntityId cam_entity) {
+    if (!show_overlay_) return;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const char* cam_name =
+        cam_entity != NULL_ENTITY && scene_->world().alive(cam_entity)
+            ? scene_->world().name_of(cam_entity).c_str() : "(none)";
+    const char* sel_name =
+        selected_ != NULL_ENTITY && scene_->world().alive(selected_)
+            ? scene_->world().name_of(selected_).c_str() : "none";
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+                  "scene: %s  [%s]\ncamera: %s  pos(%.1f, %.1f, %.1f)\nselected: %s\n"
+                  "RMB look | WASDQE fly | LMB select | W/E/R gizmo | Del | Ctrl+D | F | Ctrl+S | P",
+                  scene_->name().c_str(), scene_path_.c_str(), cam_name,
+                  static_cast<double>(camera.position.x), static_cast<double>(camera.position.y),
+                  static_cast<double>(camera.position.z), sel_name);
+    const ImVec2 pos(10.f, ImGui::GetFrameHeight() * 2.f + 10.f);
+    dl->AddText(ImVec2(pos.x + 1.f, pos.y + 1.f), IM_COL32(0, 0, 0, 180), buf);
+    dl->AddText(pos, IM_COL32(220, 220, 220, 255), buf);
+}
+
+void EditorApp::main_loop() {
     ImGuiIO& io = ImGui::GetIO();
     (void)io;
     // Route engine logs into the in-app console.
@@ -881,6 +1319,7 @@ void EditorApp::main_loop(const std::string& scene_path) {
         if (console_.size() > 2000) console_.erase(console_.begin(), console_.begin() + 500);
     });
 
+    update_window_title();
     Camera camera;
     const EntityId camEntity = find_active_camera();
     update_camera(camera, camEntity);
@@ -892,22 +1331,25 @@ void EditorApp::main_loop(const std::string& scene_path) {
         handle_viewport_input(camera, camEntity, dt);
         if (playing_) scene_->update(dt);
         update_camera(camera, camEntity);
-        handle_shortcuts(scene_path);
+        handle_shortcuts();
 
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGuizmo::BeginFrame();
         ImGui::NewFrame();
 
-        draw_menu_bar(scene_path);
-        draw_toolbar(scene_path);
+        draw_menu_bar();
+        draw_toolbar();
         if (show_hierarchy_) draw_hierarchy();
         if (show_inspector_) draw_inspector();
-        if (show_bottom_) draw_bottom_panel();
+        if (show_bottom_) draw_bottom_panel(dt);
         if (show_statusbar_) draw_status_bar(dt);
+        draw_save_as_modal();
+        draw_help_window();
         const FramebufferSize fb = window_->framebuffer_size();
         const f32 aspect = fb.height > 0 ? static_cast<f32>(fb.width) / static_cast<f32>(fb.height) : 1.f;
         draw_viewport_gizmo(camera, aspect);
+        draw_viewport_overlay(camera, camEntity);
 
         ImGui::Render();
 

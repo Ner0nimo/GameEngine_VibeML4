@@ -58,6 +58,10 @@ public:
     // must be registered beforehand (e.g. register_builtin_components +
     // physics/audio), since the registry is process-global.
     Result<void> load_file(const std::string& path);
+    // Same contract as load_file, but for already-parsed JSON (used by the
+    // editor to restore an in-memory snapshot without touching the file).
+    // Fails if the JSON is structurally malformed (not a scene object).
+    Result<void> load_json(const nlohmann::json& j);
 
 private:
     World world_;

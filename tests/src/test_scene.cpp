@@ -79,3 +79,56 @@ TEST(Scene, SystemsRunInOrder) {
     scene.update(0.016f);
     EXPECT_EQ(order, 2);
 }
+
+TEST(Scene, LoadJsonReplacesWorldAndPrefabsButKeepsSystems) {
+    Scene scene = make_scene();
+    int calls = 0;
+    scene.add_system([&](World&, f32) { ++calls; });
+
+    Scene other("other");
+    register_builtin_components(other.world());
+    EntityId e = other.world().create_entity("solo");
+    other.world().emplace<TransformComponent>(e).position = {9.f, 9.f, 9.f};
+    nlohmann::json prefab;
+    prefab["name"] = "P";
+    other.add_prefab("P", prefab);
+
+    ASSERT_TRUE(scene.load_json(other.serialize()).ok());
+    EXPECT_EQ(scene.name(), "other");
+    EXPECT_EQ(scene.world().entity_count(), 1u);
+    EXPECT_TRUE(scene.has_prefab("P"));
+    EXPECT_FALSE(scene.has_prefab("Box")); // prefabs are replaced, not merged
+
+    EntityId solo = NULL_ENTITY;
+    for (EntityId x : scene.world().all_entities()) solo = x;
+    ASSERT_NE(solo, NULL_ENTITY);
+    EXPECT_EQ(scene.world().name_of(solo), "solo");
+    ASSERT_TRUE(scene.world().has<TransformComponent>(solo));
+    EXPECT_EQ(scene.world().get<TransformComponent>(solo)->position.x, 9.f);
+
+    // The system pipeline survives load_json (same contract as load_file).
+    scene.update(0.016f);
+    EXPECT_EQ(calls, 1);
+}
+
+TEST(Scene, LoadJsonRoundtripIntoSelf) {
+    Scene scene = make_scene();
+    ASSERT_TRUE(scene.load_json(scene.serialize()).ok());
+    EXPECT_EQ(scene.name(), "demo");
+    EXPECT_EQ(scene.world().entity_count(), 2u);
+    EXPECT_TRUE(scene.has_prefab("Box"));
+    EntityId child = NULL_ENTITY;
+    for (EntityId e : scene.world().all_entities())
+        if (scene.world().name_of(e) == "child") child = e;
+    ASSERT_NE(child, NULL_ENTITY);
+    ASSERT_TRUE(scene.world().has<CameraComponent>(child));
+}
+
+TEST(Scene, LoadJsonRejectsMalformed) {
+    Scene scene = make_scene();
+    EXPECT_FALSE(scene.load_json(nlohmann::json::array()).ok()); // not an object
+    EXPECT_FALSE(scene.load_json(nlohmann::json(42)).ok());
+    // A failed load must not clobber the current scene.
+    EXPECT_EQ(scene.world().entity_count(), 2u);
+    EXPECT_EQ(scene.name(), "demo");
+}
