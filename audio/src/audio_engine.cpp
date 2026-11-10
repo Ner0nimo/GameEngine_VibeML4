@@ -146,20 +146,33 @@ Result<u32> AudioEngine::play(const std::string& path, f32 volume, bool loop) {
         if (!f) return Result<u32>::failure("cannot open '" + path + "'");
         bytes.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
-    return play_memory(bytes.data(), bytes.size(), volume, loop);
+    return play_memory_owned(std::move(bytes), volume, loop);
 }
 
 Result<u32> AudioEngine::play_memory(const void* data, size_t size, f32 volume, bool loop) {
-    if (!initialized_ || !engine_ || !data || size == 0)
+    if (!data || size == 0)
+        return Result<u32>::failure("empty audio data");
+    const auto* begin = static_cast<const u8*>(data);
+    return play_memory_owned(std::vector<u8>(begin, begin + size), volume, loop);
+}
+
+Result<u32> AudioEngine::play_memory_owned(std::vector<u8> bytes, f32 volume, bool loop) {
+    if (!initialized_ || !engine_ || bytes.empty())
         return Result<u32>::failure("audio engine not initialized or empty data");
-    // The sound references but does not own the decoder, so we keep it alive
-    // next to the sound and release both together in stop().
+    // The sound's decoder reads the encoded bytes on the audio thread, so the
+    // bytes must stay alive for the sound's whole lifetime: the SoundEntry
+    // owns them.
     auto* decoder = new ma_decoder();
-    if (ma_decoder_init_memory(data, size, nullptr, decoder) != MA_SUCCESS) {
+    auto* sound = new ma_sound();
+    const u32 id = next_id_++;
+    SoundEntry entry;
+    entry.bytes = std::move(bytes);
+    if (ma_decoder_init_memory(entry.bytes.data(), entry.bytes.size(), nullptr, decoder) != MA_SUCCESS) {
         delete decoder;
+        delete sound;
         return Result<u32>::failure("cannot decode audio data");
     }
-    auto* sound = new ma_sound();
+    entry.decoder = decoder;
     if (ma_sound_init_from_data_source(engine_, reinterpret_cast<ma_data_source*>(decoder),
                                        0, nullptr, sound) != MA_SUCCESS) {
         ma_decoder_uninit(decoder);
@@ -170,8 +183,8 @@ Result<u32> AudioEngine::play_memory(const void* data, size_t size, f32 volume, 
     ma_sound_start(sound);
     ma_sound_set_volume(sound, volume);
     ma_sound_set_looping(sound, loop ? MA_TRUE : MA_FALSE);
-    const u32 id = next_id_++;
-    sounds_[id] = SoundEntry{sound, decoder};
+    entry.sound = sound;
+    sounds_[id] = std::move(entry);
     return Result<u32>::success(id);
 }
 

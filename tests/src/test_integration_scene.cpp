@@ -109,12 +109,8 @@ TEST(Integration, TestSceneAllFeatures) {
     EXPECT_TRUE(src->spatial);
     EXPECT_TRUE(audio_sys.source_playing(emitter));
     EXPECT_GE(audio.active_sound_count(), 1u);
-    auto lua_bool = [&](const char* name) {
-        lua_getglobal(scripts.state(), name);
-        const bool v = lua_toboolean(scripts.state(), -1) != 0;
-        lua_pop(scripts.state(), 1);
-        return v;
-    };
+    // mover.lua's globals live in the mover's private script env (sandboxed).
+    auto lua_bool = [&](const char* name) { return scripts.script_env_bool(mover, name); };
     EXPECT_TRUE(lua_bool("mover_src_playing"));
     EXPECT_TRUE(lua_bool("mover_src_stopped"));
     EXPECT_TRUE(lua_bool("mover_src_restarted"));

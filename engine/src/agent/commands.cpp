@@ -2,14 +2,18 @@
 
 #include "ignis/assets/asset_manager.h"
 #include "ignis/core/log.h"
+#include "ignis/core/path_util.h"
 #include "ignis/ecs/component_registry.h"
 #include "ignis/ecs/components.h"
 #include "ignis/scene/scene.h"
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
 namespace ignis {
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -24,8 +28,23 @@ CommandResult fail(std::string msg) {
 
 } // namespace
 
+Result<std::string> CommandProcessor::scope_path(const std::string& path) const {
+    if (!host_paths_allowed_)
+        return Result<std::string>::failure("host filesystem access is disabled");
+    if (project_root_.empty())
+        return Result<std::string>::success(path);
+    if (is_unsafe_resource_path(path))
+        return Result<std::string>::failure("unsafe path '" + path + "'");
+    const fs::path resolved = fs::path(project_root_) / path;
+    if (!is_path_within_root(project_root_, resolved))
+        return Result<std::string>::failure("path '" + path + "' escapes project root");
+    return Result<std::string>::success(resolved.string());
+}
+
 CommandResult CommandProcessor::execute(const nlohmann::json& cmd) {
     if (!cmd.is_object() || !cmd.contains("cmd")) return fail("missing 'cmd'");
+    if (!cmd["cmd"].is_string()) return fail("'cmd' must be a string");
+    if (cmd.dump().size() > max_command_bytes) return fail("command too large");
     const std::string c = cmd["cmd"].get<std::string>();
     World& world = scene_.world();
 
@@ -111,27 +130,32 @@ CommandResult CommandProcessor::execute(const nlohmann::json& cmd) {
         return ok({{"prefabs", std::move(arr)}}, "prefabs");
     }
     if (c == "save_scene") {
-        const std::string path = cmd.value("path", "scene.json");
-        auto r = scene_.save_to_file(path);
+        auto scoped = scope_path(cmd.value("path", "scene.json"));
+        if (!scoped.ok()) return fail(scoped.error());
+        auto r = scene_.save_to_file(scoped.value());
         if (!r.ok()) return fail(r.error());
-        return ok({{"path", path}}, "saved");
+        return ok({{"path", scoped.value()}}, "saved");
     }
     if (c == "load_model") {
-        const std::string path = cmd.value("path", "");
-        auto model = assets_.load_model(path);
-        if (!model) return fail("cannot load model '" + path + "'");
+        auto scoped = scope_path(cmd.value("path", ""));
+        if (!scoped.ok()) return fail(scoped.error());
+        auto model = assets_.load_model(scoped.value());
+        if (!model) return fail("cannot load model '" + scoped.value() + "'");
         return ok({{"primitives", model->mesh->primitives.size()},
                    {"materials", model->materials.size()},
                    {"textures", model->textures.size()}}, "model ok");
     }
     if (c == "load_texture") {
-        const std::string path = cmd.value("path", "");
-        auto tex = assets_.load_texture(path);
-        if (!tex) return fail("cannot load texture '" + path + "'");
+        auto scoped = scope_path(cmd.value("path", ""));
+        if (!scoped.ok()) return fail(scoped.error());
+        auto tex = assets_.load_texture(scoped.value());
+        if (!tex) return fail("cannot load texture '" + scoped.value() + "'");
         return ok({{"width", tex->width}, {"height", tex->height}, {"hdr", tex->hdr}}, "texture ok");
     }
     if (c == "run_commands") {
-        auto results = execute_file(cmd.value("file", ""));
+        auto scoped = scope_path(cmd.value("file", ""));
+        if (!scoped.ok()) return fail(scoped.error());
+        auto results = execute_file(scoped.value());
         u32 succeeded = 0;
         for (const auto& r : results) if (r.ok) ++succeeded;
         return ok({{"total", results.size()}, {"succeeded", succeeded}}, "batch done");
@@ -151,6 +175,15 @@ std::vector<CommandResult> CommandProcessor::execute_file(const std::string& jso
     while (std::getline(f, line)) {
         ++line_no;
         if (line.empty()) continue;
+        if (results.size() >= max_batch_commands) {
+            results.push_back(fail("batch command limit exceeded (" +
+                                   std::to_string(max_batch_commands) + ")"));
+            break;
+        }
+        if (line.size() > max_command_bytes) {
+            results.push_back(fail("line " + std::to_string(line_no) + ": command too large"));
+            continue;
+        }
         try {
             results.push_back(execute(nlohmann::json::parse(line)));
         } catch (const std::exception& e) {

@@ -1,6 +1,11 @@
 #include "ignis/core/pak.h"
 
+#include "ignis/core/json_parse.h"
+#include "ignis/core/path_util.h"
+
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -88,8 +93,18 @@ std::string sha256_hex(const u8* data, size_t size) {
 
 // --- PakWriter ---------------------------------------------------------------
 
-void PakWriter::add_file(const std::string& pak_path, const std::vector<u8>& data) {
+Result<void> PakWriter::add_file(const std::string& pak_path, const std::vector<u8>& data) {
+    if (is_unsafe_resource_path(pak_path))
+        return Result<void>::failure("PakWriter: invalid pak path '" + pak_path + "'");
+    if (paths_.contains(pak_path))
+        return Result<void>::failure("PakWriter: duplicate pak path '" + pak_path + "'");
+    constexpr u64 kMaxEntries = 100000;
+    if (entries_.size() >= kMaxEntries)
+        return Result<void>::failure("PakWriter: too many entries (max " +
+                                     std::to_string(kMaxEntries) + ")");
+    paths_.insert(pak_path);
     entries_.push_back({pak_path, data});
+    return Result<void>::success();
 }
 
 Result<void> PakWriter::add_file_from_disk(const std::string& pak_path, const std::string& disk_path) {
@@ -98,8 +113,7 @@ Result<void> PakWriter::add_file_from_disk(const std::string& pak_path, const st
     std::ostringstream ss;
     ss << f.rdbuf();
     const std::string s = ss.str();
-    add_file(pak_path, std::vector<u8>(s.begin(), s.end()));
-    return Result<void>::success();
+    return add_file(pak_path, std::vector<u8>(s.begin(), s.end()));
 }
 
 Result<void> PakWriter::write(const std::string& out_path) const {
@@ -144,11 +158,29 @@ Result<void> PakWriter::write(const std::string& out_path) const {
 
 // --- PakReader ---------------------------------------------------------------
 
-Result<void> PakReader::open(const std::string& path) {
+namespace {
+
+bool is_hex_sha256(const std::string& s) {
+    if (s.size() != 64) return false;
+    for (char c : s) {
+        if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
+    }
+    return true;
+}
+
+} // namespace
+
+Result<void> PakReader::open(const std::string& path, const PakLimits& limits) {
     is_open_ = false;
     index_.clear();
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return Result<void>::failure("cannot open pak '" + path + "'");
+    const auto file_size_off = f.tellg();
+    if (file_size_off < 0) return Result<void>::failure("cannot stat pak '" + path + "'");
+    const u64 file_size = static_cast<u64>(file_size_off);
+    if (file_size < 8)
+        return Result<void>::failure("truncated pak header in '" + path + "'");
+    f.seekg(0, std::ios::beg);
     char magic[4] = {};
     f.read(magic, 4);
     if (!f || std::memcmp(magic, "IGPK", 4) != 0)
@@ -156,20 +188,55 @@ Result<void> PakReader::open(const std::string& path) {
     u32 index_size = 0;
     f.read(reinterpret_cast<char*>(&index_size), 4);
     if (!f) return Result<void>::failure("truncated pak header in '" + path + "'");
+    if (static_cast<u64>(index_size) > limits.max_index_bytes)
+        return Result<void>::failure("pak index too large in '" + path + "'");
+    if (static_cast<u64>(index_size) > file_size - 8)
+        return Result<void>::failure("truncated pak index in '" + path + "'");
     std::string index_str(index_size, '\0');
     f.read(index_str.data(), static_cast<std::streamsize>(index_size));
     if (!f) return Result<void>::failure("truncated pak index in '" + path + "'");
-    try {
-        auto j = nlohmann::json::parse(index_str);
-        for (auto& [name, meta] : j["files"].items()) {
-            Entry e;
-            e.offset = meta["offset"].get<u64>(); // absolute file offset (header included)
-            e.size = meta["size"].get<u64>();
-            e.sha256 = meta.value("sha256", "");
-            index_[name] = e;
-        }
-    } catch (const std::exception& e) {
-        return Result<void>::failure("bad index in '" + path + "': " + e.what());
+
+    auto parsed = parse_json_bounded(index_str);
+    if (!parsed.ok())
+        return Result<void>::failure("bad index in '" + path + "': " + parsed.error());
+    const nlohmann::json& j = parsed.value();
+    if (!j.is_object() || !j.contains("files") || !j["files"].is_object())
+        return Result<void>::failure("bad index in '" + path + "': missing 'files' object");
+    if (j["files"].size() > limits.max_entries)
+        return Result<void>::failure("too many entries in '" + path + "'");
+
+    struct Range { u64 off; u64 size; };
+    std::vector<Range> ranges;
+    ranges.reserve(j["files"].size());
+    u64 total_bytes = 0;
+    for (const auto& [name, meta] : j["files"].items()) {
+        if (is_unsafe_resource_path(name) || name.size() > limits.max_path_bytes)
+            return Result<void>::failure("bad entry path '" + name + "' in '" + path + "'");
+        if (!meta.is_object() || !meta.contains("offset") || !meta.contains("size"))
+            return Result<void>::failure("entry '" + name + "' missing offset/size in '" + path + "'");
+        if (!meta["offset"].is_number() || !meta["size"].is_number())
+            return Result<void>::failure("entry '" + name + "' has non-numeric offset/size in '" + path + "'");
+        const u64 off = meta["offset"].get<u64>();
+        const u64 size = meta["size"].get<u64>();
+        if (off < 8 + static_cast<u64>(index_size))
+            return Result<void>::failure("entry '" + name + "' overlaps pak header/index in '" + path + "'");
+        if (size > limits.max_entry_bytes)
+            return Result<void>::failure("entry '" + name + "' too large in '" + path + "'");
+        if (off > file_size || size > file_size - off)
+            return Result<void>::failure("entry '" + name + "' out of file bounds in '" + path + "'");
+        total_bytes += size;
+        if (total_bytes > limits.max_total_bytes)
+            return Result<void>::failure("pak total payload too large in '" + path + "'");
+        const std::string hash = meta.value("sha256", "");
+        if (!is_hex_sha256(hash))
+            return Result<void>::failure("entry '" + name + "' missing/malformed sha256 in '" + path + "'");
+        ranges.push_back({off, size});
+        index_[name] = Entry{off, size, hash};
+    }
+    std::sort(ranges.begin(), ranges.end(), [](const Range& a, const Range& b) { return a.off < b.off; });
+    for (size_t i = 1; i < ranges.size(); ++i) {
+        if (ranges[i].off < ranges[i - 1].off + ranges[i - 1].size)
+            return Result<void>::failure("overlapping entries in '" + path + "'");
     }
     file_path_ = path;
     is_open_ = true;
@@ -191,7 +258,7 @@ Result<std::vector<u8>> PakReader::read(const std::string& pak_path) const {
     std::vector<u8> out(it->second.size);
     f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size()));
     if (!f) return Result<std::vector<u8>>::failure("short read for '" + pak_path + "'");
-    if (!it->second.sha256.empty() && sha256_hex(out) != it->second.sha256)
+    if (sha256_hex(out) != it->second.sha256)
         return Result<std::vector<u8>>::failure("sha256 mismatch for '" + pak_path + "'");
     return Result<std::vector<u8>>::success(std::move(out));
 }

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "ignis/assets/asset_manager.h"
+#include "ignis/core/pak.h"
 
 #include <cmath>
 #include <cstring>
@@ -109,4 +110,80 @@ TEST(Assets, MissingFileReturnsNull) {
     AssetManager am;
     EXPECT_EQ(am.load_model("/nonexistent/model.gltf"), nullptr);
     EXPECT_EQ(am.load_texture("/nonexistent/tex.png"), nullptr);
+}
+
+namespace {
+
+namespace fs = std::filesystem;
+
+struct AssetSandbox {
+    fs::path tmp;
+    fs::path proj;
+    AssetSandbox() {
+        tmp = fs::temp_directory_path() / "ignis_assets_sec";
+        fs::remove_all(tmp);
+        proj = tmp / "proj";
+        fs::create_directories(proj);
+        std::ofstream(proj / "data.txt") << "hello";
+        std::ofstream(tmp / "secret.txt") << "secret";
+    }
+    ~AssetSandbox() { std::error_code ec; fs::remove_all(tmp, ec); }
+};
+
+} // namespace
+
+TEST(AssetsSecurity, ProjectModeAcceptsRelativePathWithinRoot) {
+    AssetSandbox sb;
+    AssetManager am;
+    am.set_access_mode(AssetAccessMode::ProjectFilesystem);
+    am.set_project_root(sb.proj.string());
+    auto r = am.read_file("data.txt");
+    ASSERT_TRUE(r.ok()) << r.error();
+    EXPECT_EQ(std::string(r.value().begin(), r.value().end()), "hello");
+}
+
+TEST(AssetsSecurity, ProjectModeRejectsTraversalAbsoluteAndSymlinkEscape) {
+    AssetSandbox sb;
+    std::error_code ec;
+    fs::create_symlink(sb.tmp / "secret.txt", sb.proj / "link.txt", ec);
+    ASSERT_FALSE(ec) << ec.message();
+    AssetManager am;
+    am.set_access_mode(AssetAccessMode::ProjectFilesystem);
+    am.set_project_root(sb.proj.string());
+    EXPECT_FALSE(am.read_file("../secret.txt").ok());   // traversal (file exists!)
+    EXPECT_FALSE(am.read_file(sb.tmp.string() + "/secret.txt").ok()); // absolute
+    EXPECT_FALSE(am.read_file("link.txt").ok());         // symlink escaping root
+    EXPECT_TRUE(am.read_file("nonexistent.txt").ok() == false); // controlled failure
+}
+
+TEST(AssetsSecurity, PackageOnlyNeverFallsBackToDisk) {
+    AssetSandbox sb;
+    const auto pak_path = sb.tmp / "p.ignispak";
+    PakWriter w;
+    ASSERT_TRUE(w.add_file("assets/a.bin", {'x'}).ok());
+    ASSERT_TRUE(w.write(pak_path.string()).ok());
+    PakReader reader;
+    ASSERT_TRUE(reader.open(pak_path.string()).ok());
+    AssetManager am;
+    am.set_pak(&reader);
+    am.set_access_mode(AssetAccessMode::PackageOnly);
+    auto from_pak = am.read_file("assets/a.bin");
+    ASSERT_TRUE(from_pak.ok());
+    // data.txt exists on disk under the project, but PackageOnly must not read it.
+    EXPECT_FALSE(am.read_file("data.txt").ok());
+    EXPECT_FALSE(am.read_file("../secret.txt").ok());
+}
+
+TEST(AssetsSecurity, PackageOnlyWithoutPakFails) {
+    AssetManager am;
+    am.set_access_mode(AssetAccessMode::PackageOnly);
+    EXPECT_FALSE(am.read_file("anything.txt").ok());
+}
+
+TEST(AssetsSecurity, EditorModeStillAllowsAbsolutePaths) {
+    AssetManager am; // default EditorFilesystem
+    const auto path = std::filesystem::temp_directory_path() / "ignis_editor_abs.txt";
+    std::ofstream(path) << "ok";
+    EXPECT_TRUE(am.read_file(path.string()).ok());
+    std::filesystem::remove(path);
 }

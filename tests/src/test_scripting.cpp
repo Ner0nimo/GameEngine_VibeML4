@@ -125,3 +125,155 @@ TEST(Scripting, BadScriptReportsError) {
     EXPECT_TRUE(scene.world().alive(e));
     std::filesystem::remove(path);
 }
+
+namespace {
+
+bool entity_named_exists(Scene& scene, const std::string& name) {
+    for (EntityId id : scene.world().all_entities()) {
+        if (scene.world().name_of(id) == name) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+TEST(LuaIsolation, HostLibrariesUnavailableToScripts) {
+    Scene scene("iso");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string path = write_script("ignis_iso_host.lua", R"LUA(
+function on_create(self)
+    if io == nil and os == nil and package == nil and debug == nil
+       and coroutine == nil and dofile == nil and loadfile == nil and load == nil
+       and _G.io == nil and _G.os == nil then
+        ignis.entity.create("sandbox_ok")
+    else
+        ignis.entity.create("sandbox_fail")
+    end
+end
+)LUA");
+    EntityId e = scene.world().create_entity("s");
+    scene.world().emplace<ScriptComponent>(e).path = path;
+    scripts.update(0.016f);
+    EXPECT_TRUE(entity_named_exists(scene, "sandbox_ok"));
+    EXPECT_FALSE(entity_named_exists(scene, "sandbox_fail"));
+    std::filesystem::remove(path);
+}
+
+TEST(LuaIsolation, EnvironmentsArePrivatePerScript) {
+    Scene scene("iso2");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string path_a = write_script("ignis_iso_a.lua", R"LUA(
+function on_create(self)
+    secret_marker = 42 -- lands in this script's own env, not _G
+end
+)LUA");
+    const std::string path_b = write_script("ignis_iso_b.lua", R"LUA(
+function on_create(self)
+    if secret_marker == nil and rawget(_G, "secret_marker") == nil then
+        ignis.entity.create("isolated_ok")
+    else
+        ignis.entity.create("isolated_fail")
+    end
+end
+)LUA");
+    EntityId a = scene.world().create_entity("a");
+    scene.world().emplace<ScriptComponent>(a).path = path_a;
+    EntityId b = scene.world().create_entity("b");
+    scene.world().emplace<ScriptComponent>(b).path = path_b;
+    scripts.update(0.016f);
+    EXPECT_TRUE(entity_named_exists(scene, "isolated_ok"));
+    EXPECT_FALSE(entity_named_exists(scene, "isolated_fail"));
+    std::filesystem::remove(path_a);
+    std::filesystem::remove(path_b);
+}
+
+TEST(LuaIsolation, RunawayScriptAbortedByInstructionBudget) {
+    Scene scene("budget");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    scripts.set_instruction_budget(20000); // tiny budget: must abort quickly
+    const std::string bad_path = write_script("ignis_runaway.lua", R"LUA(
+function on_update(self, dt)
+    while true do end
+end
+)LUA");
+    const std::string good_path = write_script("ignis_good.lua", R"LUA(
+function on_update(self, dt)
+    if ignis.frame() == 2 then
+        ignis.entity.create("good_ok")
+    end
+end
+)LUA");
+    EntityId bad = scene.world().create_entity("bad");
+    scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+    EntityId good = scene.world().create_entity("good");
+    scene.world().emplace<ScriptComponent>(good).path = good_path;
+    for (int i = 0; i < 3; ++i) scripts.update(0.016f); // must return, not hang
+    EXPECT_TRUE(entity_named_exists(scene, "good_ok"));   // engine still functional
+    EXPECT_TRUE(scene.world().alive(bad));                 // error swallowed, entity intact
+    std::filesystem::remove(bad_path);
+    std::filesystem::remove(good_path);
+}
+
+TEST(LuaIsolation, CyclicTableConversionIsAControlledError) {
+    Scene scene("cyclic");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string bad_path = write_script("ignis_cyclic.lua", R"LUA(
+function on_create(self)
+    local t = {}
+    t.self_ref = t
+    ignis.entity.add_component(self.entity, "Transform", t) -- cyclic table
+end
+)LUA");
+    const std::string good_path = write_script("ignis_cyclic_good.lua", R"LUA(
+function on_update(self, dt)
+    if ignis.frame() == 2 then
+        ignis.entity.create("after_cyclic_ok")
+    end
+end
+)LUA");
+    EntityId bad = scene.world().create_entity("bad");
+    scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+    EntityId good = scene.world().create_entity("good");
+    scene.world().emplace<ScriptComponent>(good).path = good_path;
+    for (int i = 0; i < 3; ++i) scripts.update(0.016f); // must not crash
+    EXPECT_TRUE(entity_named_exists(scene, "after_cyclic_ok"));
+    std::filesystem::remove(bad_path);
+    std::filesystem::remove(good_path);
+}
+
+TEST(LuaIsolation, BadScriptDoesNotCorruptEngineState) {
+    Scene scene("bad2");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string bad_path = write_script("ignis_bad2.lua", "this is not lua {{{");
+    const std::string good_path = write_script("ignis_good2.lua", R"LUA(
+function on_update(self, dt)
+    if ignis.frame() == 1 then
+        ignis.entity.create("still_works")
+    end
+end
+)LUA");
+    EntityId bad = scene.world().create_entity("bad");
+    scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+    EntityId good = scene.world().create_entity("good");
+    scene.world().emplace<ScriptComponent>(good).path = good_path;
+    for (int i = 0; i < 2; ++i) scripts.update(0.016f);
+    EXPECT_TRUE(entity_named_exists(scene, "still_works"));
+    EXPECT_TRUE(scene.world().alive(bad));
+    std::filesystem::remove(bad_path);
+    std::filesystem::remove(good_path);
+}

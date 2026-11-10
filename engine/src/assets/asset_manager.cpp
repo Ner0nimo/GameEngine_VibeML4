@@ -2,24 +2,42 @@
 
 #include "ignis/core/log.h"
 #include "ignis/core/pak.h"
+#include "ignis/core/path_util.h"
 
 #include <stb_image.h>
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
 namespace ignis {
+
+namespace fs = std::filesystem;
 
 // Defined in texture_loader.cpp; decodes an in-memory image (png/jpg/hdr).
 std::shared_ptr<Texture> decode_texture_memory(
     const std::string& name, const std::vector<u8>& bytes, bool force_hdr);
 
 Result<std::vector<u8>> AssetManager::read_file(const std::string& path) {
+    if (mode_ == AssetAccessMode::PackageOnly) {
+        if (!pak_) return Result<std::vector<u8>>::failure("package-only mode but no pak set");
+        return pak_->read(path); // a miss is an error, never a disk fallback
+    }
+    if (mode_ != AssetAccessMode::EditorFilesystem && is_unsafe_resource_path(path))
+        return Result<std::vector<u8>>::failure("unsafe asset path '" + path + "'");
     if (pak_) {
         auto from_pak = pak_->read(path);
         if (from_pak.ok()) return from_pak;
     }
-    std::ifstream f(path, std::ios::binary);
+    fs::path resolved = path;
+    if (mode_ == AssetAccessMode::ProjectFilesystem) {
+        if (project_root_.empty())
+            return Result<std::vector<u8>>::failure("no project root set for asset access");
+        resolved = fs::path(project_root_) / path;
+        if (!is_path_within_root(project_root_, resolved))
+            return Result<std::vector<u8>>::failure("asset path '" + path + "' escapes project root");
+    }
+    std::ifstream f(resolved, std::ios::binary);
     if (!f) return Result<std::vector<u8>>::failure("cannot open '" + path + "'");
     std::ostringstream ss;
     ss << f.rdbuf();

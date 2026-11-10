@@ -94,3 +94,130 @@ TEST(AgentCommands, JsonlBatch) {
     EXPECT_EQ(scene.world().entity_count(), 3u);
     std::filesystem::remove(path);
 }
+
+namespace {
+
+namespace fs = std::filesystem;
+
+struct AgentSandbox {
+    fs::path tmp;
+    fs::path proj;
+    AgentSandbox() {
+        tmp = fs::temp_directory_path() / "ignis_agent_sec";
+        fs::remove_all(tmp);
+        proj = tmp / "proj";
+        fs::create_directories(proj);
+        std::ofstream(tmp / "evil.json") << "should not be written";
+    }
+    ~AgentSandbox() { std::error_code ec; fs::remove_all(tmp, ec); }
+};
+
+} // namespace
+
+TEST(AgentSecurity, UnknownAndMalformedCommandsFail) {
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    CommandProcessor proc(scene, assets);
+    EXPECT_FALSE(proc.execute({{"cmd", "definitely_not_a_command"}}).ok);
+    EXPECT_FALSE(proc.execute({{"no_cmd", true}}).ok);
+    EXPECT_FALSE(proc.execute(nlohmann::json::array()).ok);
+    EXPECT_FALSE(proc.execute({{"cmd", 42}}).ok); // cmd must be a string
+}
+
+TEST(AgentSecurity, DeadEntityCommandsFail) {
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    CommandProcessor proc(scene, assets);
+    EXPECT_FALSE(proc.execute({{"cmd", "destroy_entity"}, {"entity", 999}}).ok);
+    EXPECT_FALSE(proc.execute({{"cmd", "add_component"}, {"entity", 999},
+                               {"component", "Transform"}, {"props", nlohmann::json::object()}}).ok);
+    EXPECT_FALSE(proc.execute({{"cmd", "get_entity"}, {"entity", 999}}).ok);
+}
+
+TEST(AgentSecurity, PathCommandsScopedToProjectRoot) {
+    AgentSandbox sb;
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    CommandProcessor proc(scene, assets);
+    proc.set_project_root(sb.proj.string());
+
+    auto r = proc.execute({{"cmd", "save_scene"}, {"path", "ok.json"}});
+    EXPECT_TRUE(r.ok) << r.message;
+    EXPECT_TRUE(fs::exists(sb.proj / "ok.json"));
+
+    r = proc.execute({{"cmd", "save_scene"}, {"path", "../evil.json"}});
+    EXPECT_FALSE(r.ok);
+    // The pre-existing file outside the root must be untouched.
+    std::ifstream f(sb.tmp / "evil.json");
+    const std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(content, "should not be written");
+
+    r = proc.execute({{"cmd", "save_scene"}, {"path", sb.tmp.string() + "/abs.json"}});
+    EXPECT_FALSE(r.ok); // absolute path rejected
+
+    r = proc.execute({{"cmd", "load_model"}, {"path", "../evil.json"}});
+    EXPECT_FALSE(r.ok);
+    r = proc.execute({{"cmd", "run_commands"}, {"file", "../evil.json"}});
+    EXPECT_FALSE(r.ok);
+}
+
+TEST(AgentSecurity, HostPathsCanBeDeniedEntirely) {
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    CommandProcessor proc(scene, assets);
+    proc.set_host_paths_allowed(false);
+    EXPECT_FALSE(proc.execute({{"cmd", "save_scene"}, {"path", "scene.json"}}).ok);
+    EXPECT_FALSE(proc.execute({{"cmd", "load_model"}, {"path", "x.gltf"}}).ok);
+    EXPECT_FALSE(proc.execute({{"cmd", "load_texture"}, {"path", "x.png"}}).ok);
+    EXPECT_FALSE(proc.execute({{"cmd", "run_commands"}, {"file", "x.jsonl"}}).ok);
+    // Non-path commands still work.
+    EXPECT_TRUE(proc.execute({{"cmd", "create_entity"}, {"name", "ok"}}).ok);
+}
+
+TEST(AgentSecurity, BatchCommandLimitEnforced) {
+    AgentSandbox sb;
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    CommandProcessor proc(scene, assets);
+    proc.max_batch_commands = 3;
+    const auto batch = sb.proj / "batch.jsonl";
+    {
+        std::ofstream f(batch);
+        for (int i = 0; i < 5; ++i)
+            f << "{\"cmd\":\"create_entity\",\"name\":\"e" << i << "\"}\n";
+    }
+    auto results = proc.execute_file(batch.string());
+    ASSERT_EQ(results.size(), 4u); // 3 executed + 1 failure marker
+    EXPECT_FALSE(results.back().ok);
+    EXPECT_EQ(scene.world().entity_count(), 3u);
+}
+
+TEST(AgentSecurity, OversizedCommandsRejected) {
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    CommandProcessor proc(scene, assets);
+    proc.max_command_bytes = 64;
+    nlohmann::json big;
+    big["cmd"] = "create_entity";
+    big["name"] = std::string(1000, 'x');
+    EXPECT_FALSE(proc.execute(big).ok);
+
+    // Oversized line inside a batch file fails that line only.
+    const auto path = std::filesystem::temp_directory_path() / "ignis_big_line.jsonl";
+    {
+        std::ofstream f(path);
+        f << "{\"cmd\":\"create_entity\",\"name\":\"" << std::string(1000, 'x') << "\"}\n";
+        f << "{\"cmd\":\"create_entity\",\"name\":\"fine\"}\n";
+    }
+    auto results = proc.execute_file(path.string());
+    ASSERT_EQ(results.size(), 2u);
+    EXPECT_FALSE(results[0].ok);
+    EXPECT_TRUE(results[1].ok);
+    std::filesystem::remove(path);
+}

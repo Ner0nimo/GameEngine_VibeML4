@@ -8,6 +8,7 @@
 #include <unordered_map>
 
 struct lua_State;
+struct lua_Debug;
 
 namespace ignis {
 
@@ -43,6 +44,16 @@ public:
     u64 frame() const noexcept { return frame_; }
     f32 delta_time() const noexcept { return dt_; }
 
+    // Execution budget: max Lua instructions across all scripts per update()
+    // call. A script that exceeds it gets a controlled Lua error, not a hang.
+    void set_instruction_budget(u64 budget) noexcept { instruction_budget_ = budget; }
+    u64 instruction_budget() const noexcept { return instruction_budget_; }
+
+    // Reads a global from the private script environment of entity e
+    // (introspection/tests). Returns false if there is no env or the global
+    // is not boolean.
+    bool script_env_bool(EntityId e, const char* name) const;
+
 private:
     Result<void> ensure_env(EntityId e);
     Result<int> load_chunk(const std::string& path);
@@ -50,6 +61,7 @@ private:
     // errors here (top of the script-call boundary) so one bad script cannot
     // take down the frame loop.
     void run_callback(int env_ref, const char* name, bool pass_dt, f32 dt);
+    static void instruction_hook(lua_State* L, lua_Debug* ar);
 
     lua_State* L_ = nullptr;
     Scene* scene_ = nullptr;
@@ -58,6 +70,8 @@ private:
     std::unordered_map<std::string, int> chunks_;   // path  -> registry ref of compiled chunk
     u64 frame_ = 0;
     f32 dt_ = 0.f;
+    u64 instruction_budget_ = 1000000;
+    u64 instruction_used_ = 0;
 };
 
 } // namespace ignis

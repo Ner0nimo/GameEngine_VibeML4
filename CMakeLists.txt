@@ -19,6 +19,7 @@ option(IGNIS_BUILD_TESTS    "Build unit tests and the integration test scene" ON
 option(IGNIS_WITH_GRAPHICS  "Build window/renderer/editor against real GPU deps (GLFW windowing, NVRHI/Vulkan)" ON)
 option(IGNIS_BUILD_EDITOR   "Build the editor executable (requires IGNIS_WITH_GRAPHICS)" ON)
 option(IGNIS_BUILD_EXPORTER "Build the ignis-export CLI tool" ON)
+option(IGNIS_FUZZING "Build libFuzzer targets for the pak/scene parsers (requires Clang + sanitizers)" OFF)
 
 include(cmake/CompilerSettings.cmake)
 include(cmake/Dependencies.cmake)
