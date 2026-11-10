@@ -46,5 +46,6 @@ IGPK pak, JSON agent commands) ← `scripting/` (Lua 5.4, `ignis.*` API),
 ## Commit rules
 
 Review code before committing (style, warnings, tests green), short imperative
-commit message, push to `main` of `github.com/Ner0nimo/GameEngine_VibeML4` only
-after `ctest` passes. Never commit `build/`.
+commit message. Work on a branch (`vibe/<slug>`), open a PR, and merge to
+`main` of `github.com/Ner0nimo/GameEngine_VibeML4` only when all tests and CI
+pass — never push directly to `main`. Never commit `build/`.

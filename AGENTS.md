@@ -73,56 +73,88 @@ Module dependency rule: lower modules never depend on higher ones
 
 ## Function design rules (the three rules)
 
-Every function in Ignis follows these three rules. When auditing or writing
-code, check each function against all three.
+Every function in Ignis follows these three rules. When writing, reviewing, or
+refactoring code, check each function against all three.
 
-### 1. Build your system out of honest functions; inject dishonesty at the topmost possible level
+### 1. Fulfill your contract completely; never make callers compensate — and be defensive about what you consume
 
-A function does exactly what its name and contract say — no silent coercions,
-no hidden fallbacks, no magic sentinel behavior buried inside. When the real
-world forces dishonesty (a driver may crash, a file may be corrupt, an input
-may be invalid), handle it as high up the call stack as possible (usually
-`main()` / `EditorApp::run()` / a top-level orchestrator) and let lower levels
-report failure honestly instead of papering over it.
+A function must do exactly what its name and contract promise: return a
+complete, meaningful result, or explicitly report why it could not. Callers
+must not have to compensate for incomplete operations, interpret undocumented
+sentinel values, repeat validation, or repair inconsistent state.
 
-- `World::set_parent` returns `bool` and refuses dead parents and cycles at
-  write time; `world_matrix` then trusts the acyclic invariant instead of
-  carrying a magic "guard < 1024" loop.
-- `Scene::load_file` really loads INTO the scene (keeps registered systems)
-  instead of silently doing `*this = deserialize(...)`.
-- Low-level functions return `Result<T>` and never swallow errors; the
-  top-level caller decides what to do with `r.error()`. The fork-based Vulkan
-  probe lives in `EditorApp::run`/`main` — that is the topmost level where
-  "the driver might segfault" belongs.
+At the same time, do not blindly trust inputs or dependencies. Validate
+untrusted input at system boundaries, enforce invariants at mutation
+boundaries, and trust established internal invariants — but still detect
+violations instead of silently accommodating them. When something can fail,
+report the failure explicitly; the recovery decision (propagate, retry,
+degrade, substitute a documented fallback, abort) belongs to the highest layer
+that has enough semantic context for it — not necessarily `main()`. An
+explicit, documented fallback is fine; a concealed one is not. Never hide a
+programming error behind a fallback.
 
-### 2. Signatures should communicate and show empathy for callers
+- `World::set_parent` validates entities and rejects cycles itself, so callers
+  don't duplicate those checks and `world_matrix` can trust the acyclic
+  invariant (no magic `guard < 1024` loop).
+- `Scene::load_file` really loads INTO the scene and preserves registered
+  systems instead of silently doing `*this = deserialize(...)`.
+- Low-level functions return `Result<T>` and never swallow errors; the caller
+  decides what to do with `r.error()`. The fork-based Vulkan probe lives in
+  `EditorApp::run`/`main` because only the top level knows that a driver
+  crash is unrecoverable there.
+- Negative example: `Texture load_texture(path) { if (!exists) return
+  default_texture; }` — the caller cannot distinguish the requested texture
+  from the fallback. Return `Result<Texture>` / `std::optional<Texture>` and
+  let the asset-policy layer decide on placeholders.
 
-The signature alone should tell the caller what the function does, what it
-needs, and how it can fail. If a caller has to declare a temp string just to
-receive an error, or guess whether `0`/`-1`/`nullptr` means failure, the
-signature is not empathetic.
+### 2. Signatures should communicate the contract and minimize caller burden
 
-- Prefer `Result<T>` (see `core/result.h`) over `bool f(..., std::string& err)`:
-  `Result<void> AudioEngine::init(bool null_device)` — one object carries
-  success and message: `if (auto r = audio.init(true); !r.ok()) log(r.error());`
-- Prefer returning values over out-params:
-  `Result<std::vector<u8>> PakReader::read(path)` instead of
-  `bool read(path, std::vector<u8>& out)`;
+The signature — name, parameter types, return type, plus docs and
+preconditions — should communicate inputs, outputs, ownership, and failure
+modes. Callers should not have to guess what special values mean, construct
+unnecessary temporaries, or read the implementation to use a function
+correctly. Pick the type that matches the semantics of the operation; do not
+add wrapper types when a simpler type already expresses the contract:
+
+- `Result<T>` (see `core/result.h`) when the caller needs to understand
+  failure: `Result<void> AudioEngine::init(bool null_device)` — one object
+  carries success and message: `if (auto r = audio.init(true); !r.ok())
+  log(r.error());` — instead of `bool init(std::string& err)`.
+- `std::optional<T>` when absence is an ordinary outcome:
+  `std::optional<f32> ray_aabb(...)` instead of a `-1` sentinel.
+- Return values instead of out-params: `Result<std::vector<u8>>
+  PakReader::read(path)` instead of `bool read(path, std::vector<u8>& out)`;
   `picking::Ray screen_ray(cam, aspect, x, y)` instead of two out-params;
-  `std::optional<f32> ray_aabb(...)` instead of a `-1` sentinel;
   `FramebufferSize framebuffer_size()` instead of `void f(u32&, u32&)`.
+- `bool` when the outcome is genuinely yes/no; `void` when the operation
+  cannot meaningfully fail. The goal is to make correct usage obvious and
+  misuse difficult — not to maximize type complexity.
 
-### 3. Stay at one level of abstraction
+### 3. Keep each function at a consistent level of abstraction
 
-A function body should read like a summary of what happens; every step that
-belongs to a lower level of detail goes into its own named function one level
-down. Don't mix "create window" with "fill in VkInstanceCreateInfo".
+A function should read like one coherent operation: its major steps expressed
+at roughly the same level of conceptual detail, with lower-level details
+delegated to meaningful, named functions. Do not mix high-level orchestration
+with low-level implementation details in one body — but also do not extract
+trivial statements into helpers just to make a function shorter.
+Decomposition should improve understanding, not create indirection. The goal
+is readability, not maximal decomposition.
 
 - `ScriptEngine::update` iterates script entities and delegates the actual
   call to `run_callback(env_ref, "on_update", true, dt)`.
 - `AudioSystem::update` = `stop_orphaned_sources(world)` + `update_source(e, world)` per entity.
-- `EditorApp::run` is split into `init_*` helpers and the main loop instead of
-  one 400-line body mixing window, renderer, ImGui and UI code.
+- `EditorApp::run` delegates to `init_*` helpers and `main_loop` instead of
+  one 400-line body mixing window, renderer, ImGui and event handling.
+
+### Using the three rules together
+
+The rules complement each other — do not satisfy one at the expense of
+another: don't split functions into meaningless helpers for rule 3, don't
+wrap every call in `Result` for rule 2, don't push recovery into an
+inappropriate layer for rule 1. When in doubt, prefer explicit contracts,
+meaningful abstractions, and the simplest design that preserves correctness.
+Rule 1 protects correctness, rule 2 API quality, rule 3 maintainability.
+
 
 ## Adding a feature (workflow)
 
@@ -137,7 +169,9 @@ down. Don't mix "create window" with "fill in VkInstanceCreateInfo".
 - Code review before every commit: check style, warnings, tests.
 - Commit message: short imperative summary; body explains why.
 - Never commit build/ directories (see .gitignore).
-- Push to `origin main` of Ner0nimo/GameEngine_VibeML4 only after tests pass.
+- Do all work on a branch (`vibe/<slug>`), open a PR, and merge to `main` of
+  Ner0nimo/GameEngine_VibeML4 only when all tests and CI pass. Do not push
+  directly to `main`.
 
 ## AI-agent control of the editor
 
