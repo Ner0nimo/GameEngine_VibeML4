@@ -1194,7 +1194,8 @@ void EditorApp::draw_inspector() {
                 info->add_default(w, selected_);
                 history_->commit();
             }
-            item_tooltip("add %s with default values", name.c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("add %s with default values", name.c_str());
         }
         ImGui::EndCombo();
     }
