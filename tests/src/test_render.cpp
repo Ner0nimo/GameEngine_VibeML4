@@ -264,9 +264,10 @@ TEST(Render, PointLightLightsCube) {
     };
     const u64 lit = total(withLight);
     const u64 dark = total(without);
-    std::fprintf(stderr, "point light: total with=%llu without=%llu center with=%u without=%u\n",
+    const size_t ci = (2u * 64u + 2u) * 4u; // sky corner: debug-encoded light data
+    std::fprintf(stderr, "point light: total with=%llu without=%llu center with=%u without=%u sky=(%u,%u,%u)\n",
                  static_cast<unsigned long long>(lit), static_cast<unsigned long long>(dark),
-                 center(withLight), center(without));
+                 center(withLight), center(without), withLight[ci], withLight[ci + 1], withLight[ci + 2]);
     EXPECT_GT(lit, dark + 2000u) << "point light must brighten the frame";
     EXPECT_GT(center(withLight), center(without) + 20u) << "center pixel must brighten too";
 }
