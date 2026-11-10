@@ -32,9 +32,9 @@ struct RawVulkanHandles {
 // NVRHI/Vulkan implementation of IRenderer.
 //
 // Deferred pipeline: G-Buffer (albedo/normal/ORM/emissive/worldPos) ->
-// shadow map (directional, 3x3 PCF soft shadows) -> SSAO (+blur) ->
-// PBR lighting with IBL irradiance cubemap (HDR) -> ACES tonemap ->
-// debug/gizmo lines.
+// shadow map (directional, PCSS soft shadows) -> SSAO (+blur) ->
+// PBR lighting with split-sum IBL (irradiance + prefiltered radiance cubemap
+// + BRDF LUT) in HDR -> ACES tonemap -> debug/gizmo lines.
 //
 // Two modes:
 //  - windowed:  init(window) - renders into the GLFW swapchain
@@ -68,7 +68,8 @@ public:
     // this. If none is set, an internal AssetManager is used.
     void set_asset_manager(AssetManager* am) { assets_ = am; }
 
-    // IBL: load a polyhaven-style .hdr equirect and build the irradiance cubemap.
+    // IBL: load a polyhaven-style .hdr equirect and build the irradiance cubemap
+    // plus the mipmapped prefiltered radiance cubemap (specular reflections).
     Result<void> set_environment_hdr(const std::string& path);
 
 private:
