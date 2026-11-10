@@ -1,10 +1,45 @@
 name: CI
 
+# Only run when something build-relevant changes. Doc/image-only commits
+# (e.g. *.md) skip the runners entirely to save Actions minutes. Code,
+# scenes/, scripts/, assets/, cmake/, and .github/workflows/ always trigger.
+# Manual runs are possible via the Actions tab (workflow_dispatch).
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.png'
+      - '**/*.jpg'
+      - '**/*.jpeg'
+      - '**/*.gif'
+      - '**/*.svg'
+      - '**/*.webp'
+      - '**/*.ico'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE*'
+      - 'LICENSE'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.png'
+      - '**/*.jpg'
+      - '**/*.jpeg'
+      - '**/*.gif'
+      - '**/*.svg'
+      - '**/*.webp'
+      - '**/*.ico'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE*'
+      - 'LICENSE'
+  workflow_dispatch:
+
+# Cancel a superseded run on the same ref (e.g. rapid pushes to a PR branch)
+# instead of paying for both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   headless:
