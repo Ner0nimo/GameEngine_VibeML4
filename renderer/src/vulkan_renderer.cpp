@@ -88,6 +88,9 @@ struct LinePush {
 constexpr u32 kEnvMipLevels = 5;
 constexpr u32 kPrefilterFaceSize = 64; // base face size of the specular prefilter cubemap
 constexpr u32 kBrdfLutSize = 128;
+// Fixed-capacity light lists in LightUBO (std140 vec4 arrays in the shader).
+constexpr u32 kMaxPointLights = 8;
+constexpr u32 kMaxSpotLights = 4;
 
 struct LightUBO {
     alignas(16) math::Vec3 camPos;
@@ -108,6 +111,15 @@ struct LightUBO {
     f32 shadowBoxWidth;
     f32 _pad2;
     alignas(16) math::Vec4 clearColor;
+    // Local lights (unshadowed). Arrays are fixed-size std140 vec4s.
+    alignas(16) math::Vec4 pointPosRange[kMaxPointLights]; // xyz = world pos, w = range
+    alignas(16) math::Vec4 pointColorInt[kMaxPointLights]; // rgb = color, w = intensity
+    alignas(16) math::Vec4 spotPos[kMaxSpotLights];        // xyz = world pos, w = unused
+    alignas(16) math::Vec4 spotDirCone[kMaxSpotLights];    // xyz = direction, w = cos(outer angle)
+    alignas(16) math::Vec4 spotColorInt[kMaxSpotLights];   // rgb = color, w = intensity
+    alignas(16) math::Vec4 spotInnerRange[kMaxSpotLights]; // x = cos(inner angle), y = range
+    alignas(8) math::Vec2 lightCounts;                     // x = point count, y = spot count
+    f32 _pad3, _pad4;
 };
 
 struct SSAOUBO {
@@ -1215,6 +1227,38 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         lu.shadowMaxPenumbra = 16.f;
         lu.shadowLightSize = 4.f;
         lu.shadowBoxWidth = 2.f * kShadowBoxHalf;
+        // Local lights: fixed-capacity lists (world position from the transform).
+        u32 pointCount = 0;
+        for (EntityId e : scene.world().view<PointLightComponent, TransformComponent>()) {
+            if (pointCount >= kMaxPointLights) {
+                IGNIS_WARN("point light limit ({}) reached, ignoring extras", kMaxPointLights);
+                break;
+            }
+            const auto* pl = scene.world().get<PointLightComponent>(e);
+            if (!pl) continue;
+            const math::Mat4 wm = world_matrix(scene.world(), e);
+            lu.pointPosRange[pointCount] = math::Vec4(math::Vec3(wm[3]), pl->range);
+            lu.pointColorInt[pointCount] = math::Vec4(pl->color, pl->intensity);
+            ++pointCount;
+        }
+        u32 spotCount = 0;
+        for (EntityId e : scene.world().view<SpotLightComponent, TransformComponent>()) {
+            if (spotCount >= kMaxSpotLights) {
+                IGNIS_WARN("spot light limit ({}) reached, ignoring extras", kMaxSpotLights);
+                break;
+            }
+            const auto* sl = scene.world().get<SpotLightComponent>(e);
+            if (!sl) continue;
+            const math::Mat4 wm = world_matrix(scene.world(), e);
+            const f32 outerCos = glm::cos(glm::radians(sl->outer_angle_deg));
+            const f32 innerCos = glm::cos(glm::radians(sl->inner_angle_deg));
+            lu.spotPos[spotCount] = math::Vec4(math::Vec3(wm[3]), 0.f);
+            lu.spotDirCone[spotCount] = math::Vec4(glm::normalize(sl->direction), outerCos);
+            lu.spotColorInt[spotCount] = math::Vec4(sl->color, sl->intensity);
+            lu.spotInnerRange[spotCount] = math::Vec4(innerCos, sl->range, 0.f, 0.f);
+            ++spotCount;
+        }
+        lu.lightCounts = math::Vec2(static_cast<f32>(pointCount), static_cast<f32>(spotCount));
         // clear color from active camera component
         lu.clearColor = math::Vec4(0.02f, 0.02f, 0.03f, 1.f);
         for (EntityId e : scene.world().view<CameraComponent>()) {

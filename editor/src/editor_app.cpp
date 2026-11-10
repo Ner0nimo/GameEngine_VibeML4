@@ -333,6 +333,15 @@ void edit_point_light(PointLightComponent& l) {
     ImGui::DragFloat("range", &l.range, 0.1f, 0.1f, 1000.f);
 }
 
+void edit_spot_light(SpotLightComponent& l) {
+    ImGui::DragFloat3("direction", &l.direction.x, 0.01f);
+    ImGui::ColorEdit3("color", &l.color.x);
+    ImGui::DragFloat("intensity", &l.intensity, 0.1f, 0.f, 1000.f);
+    ImGui::DragFloat("range", &l.range, 0.1f, 0.1f, 1000.f);
+    ImGui::DragFloat("inner_angle_deg", &l.inner_angle_deg, 0.5f, 0.f, 90.f);
+    ImGui::DragFloat("outer_angle_deg", &l.outer_angle_deg, 0.5f, 0.f, 90.f);
+}
+
 void edit_mesh_renderer(MeshRendererComponent& m) {
     char buf[256];
     std::snprintf(buf, sizeof(buf), "%s", m.model_path.c_str());
@@ -995,6 +1004,7 @@ void EditorApp::draw_inspector() {
             else if (info->name == "Camera") edit_camera(*w.get<CameraComponent>(selected_));
             else if (info->name == "DirectionalLight") edit_directional_light(*w.get<DirectionalLightComponent>(selected_));
             else if (info->name == "PointLight") edit_point_light(*w.get<PointLightComponent>(selected_));
+            else if (info->name == "SpotLight") edit_spot_light(*w.get<SpotLightComponent>(selected_));
             else if (info->name == "MeshRenderer") edit_mesh_renderer(*w.get<MeshRendererComponent>(selected_));
             else if (info->name == "Script") edit_script(*w.get<ScriptComponent>(selected_));
             else if (info->name == "RigidBody") edit_rigid_body(*w.get<RigidBodyComponent>(selected_));

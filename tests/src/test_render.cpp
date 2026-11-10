@@ -212,6 +212,50 @@ TEST(Render, OffscreenCubeLit) {
     }
 }
 
+// A point light (with the directional light disabled) must brighten the cube
+// compared to the same scene with the point light at zero intensity.
+TEST(Render, PointLightLightsCube) {
+    if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
+    auto render_with_point = [](f32 point_intensity) {
+        Scene scene = make_render_scene();
+        for (EntityId e : scene.world().view<DirectionalLightComponent>()) {
+            if (auto* l = scene.world().get<DirectionalLightComponent>(e)) {
+                l->intensity = 0.f;
+                l->cast_shadow = false;
+            }
+        }
+        EntityId lamp = scene.world().create_entity("lamp");
+        auto& lt = scene.world().emplace<TransformComponent>(lamp);
+        lt.position = {0.f, 1.f, 2.f};
+        auto& pl = scene.world().emplace<PointLightComponent>(lamp);
+        pl.color = {1.f, 1.f, 1.f};
+        pl.intensity = point_intensity;
+        pl.range = 10.f;
+        Camera camera;
+        camera.position = {0.f, 0.f, 3.f};
+        camera.fov_y_deg = 60.f;
+        VulkanRenderer renderer;
+        if (!renderer.init_offscreen(64, 64).ok()) return std::vector<u8>{};
+        renderer.render(scene, camera, 1.f / 60.f);
+        auto rb = renderer.readback();
+        renderer.shutdown();
+        return rb.ok() ? std::move(rb.value()) : std::vector<u8>{};
+    };
+    const std::vector<u8> withLight = render_with_point(50.f);
+    const std::vector<u8> without = render_with_point(0.f);
+    ASSERT_EQ(withLight.size(), 64u * 64u * 4u);
+    ASSERT_EQ(without.size(), withLight.size());
+    auto center = [](const std::vector<u8>& px) {
+        const size_t i = (32u * 64u + 32u) * 4u;
+        return static_cast<u32>(px[i]) + px[i + 1] + px[i + 2];
+    };
+    const u32 lit = center(withLight);
+    const u32 dark = center(without);
+    std::fprintf(stderr, "point light: with=%u without=%u\n", lit, dark);
+    EXPECT_GT(lit, dark + 20u) << "point light must brighten the cube: with=" << lit
+                               << " without=" << dark;
+}
+
 TEST(Render, DebugLinesDrawn) {
     if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
     Scene scene("lines");
@@ -294,6 +338,9 @@ TEST(Render, TestSceneOffscreenRenders) {
 #else
 
 TEST(Render, OffscreenCubeLit) {
+    GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
+}
+TEST(Render, PointLightLightsCube) {
     GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
 }
 TEST(Render, DebugLinesDrawn) {
