@@ -92,6 +92,12 @@ public:
     // and applied when the renderer is initialized.
     void set_bloom(bool enabled, f32 strength = 0.6f, f32 threshold = 1.0f, f32 knee = 0.5f);
 
+    // Screen-space reflections: enable/disable and set strength. Reflections
+    // are traced against the G-buffer depth after the lighting pass and blended
+    // over the IBL specular by hit confidence. Defaults: on, strength 1.0.
+    // Safe to call before init(): cached and applied at initialization.
+    void set_ssr(bool enabled, f32 strength = 1.0f);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -110,6 +116,8 @@ private:
     f32 bloom_strength_ = 0.6f;
     f32 bloom_threshold_ = 1.0f;
     f32 bloom_knee_ = 0.5f;
+    bool ssr_enabled_ = true;
+    f32 ssr_strength_ = 1.0f;
 };
 
 } // namespace ignis

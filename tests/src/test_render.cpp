@@ -379,6 +379,57 @@ TEST(Render, BloomAddsHalo) {
     EXPECT_GT(ringOn, ringOff + 2u) << "bloom must brighten the ring around the cube";
 }
 
+// SSR must add the cube's reflected light to the ground (lower half of the
+// frame) compared to SSR off (IBL-only reflections).
+TEST(Render, SSRReflectsScene) {
+    if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
+    auto render = [](bool ssr) {
+        Scene scene("ssr");
+        register_builtin_components(scene.world());
+        EntityId ground = scene.world().create_entity("ground");
+        auto& gt = scene.world().emplace<TransformComponent>(ground);
+        gt.position = {0.f, -1.f, 0.f};
+        gt.scale = {40.f, 1.f, 40.f};
+        scene.world().emplace<MeshRendererComponent>(ground).model_path = "assets/cube.gltf";
+        EntityId cube = scene.world().create_entity("cube");
+        auto& ct = scene.world().emplace<TransformComponent>(cube);
+        ct.position = {0.f, 2.f, -2.f};
+        scene.world().emplace<MeshRendererComponent>(cube).model_path = "assets/cube.gltf";
+        EntityId sun = scene.world().create_entity("sun");
+        auto& dl = scene.world().emplace<DirectionalLightComponent>(sun);
+        dl.direction = {0.f, -1.f, -0.5f};
+        dl.intensity = 3.f;
+        Camera camera;
+        camera.position = {0.f, 1.f, 4.f};
+        camera.fov_y_deg = 60.f;
+        VulkanRenderer renderer;
+        if (!renderer.init_offscreen(64, 64).ok()) return std::vector<u8>{};
+        renderer.set_ssr(ssr, 2.0f);
+        renderer.render(scene, camera, 1.f / 60.f);
+        auto rb = renderer.readback();
+        renderer.shutdown();
+        return rb.ok() ? std::move(rb.value()) : std::vector<u8>{};
+    };
+    const std::vector<u8> on = render(true);
+    const std::vector<u8> off = render(false);
+    ASSERT_EQ(on.size(), 64u * 64u * 4u);
+    ASSERT_EQ(off.size(), on.size());
+    auto lowerHalf = [](const std::vector<u8>& px) {
+        u64 sum = 0;
+        for (u32 y = 32; y < 64; ++y)
+            for (u32 x = 0; x < 64; ++x) {
+                const size_t i = (static_cast<size_t>(y) * 64u + x) * 4u;
+                sum += static_cast<u64>(px[i]) + static_cast<u64>(px[i + 1]) + static_cast<u64>(px[i + 2]);
+            }
+        return sum;
+    };
+    const u64 withSSR = lowerHalf(on);
+    const u64 without = lowerHalf(off);
+    std::fprintf(stderr, "ssr: lower-half with=%llu without=%llu\n",
+                 static_cast<unsigned long long>(withSSR), static_cast<unsigned long long>(without));
+    EXPECT_GT(withSSR, without + 300u) << "SSR must brighten the ground via the cube's reflection";
+}
+
 TEST(Render, DebugLinesDrawn) {
     if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
     Scene scene("lines");
