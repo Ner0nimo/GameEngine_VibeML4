@@ -4,6 +4,7 @@ add_executable(ignis_tests
     src/test_math.cpp
     src/test_ecs.cpp
     src/test_scene.cpp
+    src/test_history.cpp
     src/test_pak.cpp
     src/test_assets.cpp
     src/test_scripting.cpp
