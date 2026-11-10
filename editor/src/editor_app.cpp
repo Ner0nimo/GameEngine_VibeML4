@@ -1679,6 +1679,11 @@ void EditorApp::main_loop() {
 
         ImGui::Render();
 
+        // If render() produced no frame this frame (e.g. swapchain out of date
+        // and recreation pending), skip the overlay + present: presenting a
+        // stale image is what causes visible flicker.
+        if (!renderer_->frame_rendered()) continue;
+
         // --- ImGui overlay pass on the swapchain image ------------------------------
         // (the scene was already rendered above; rhNow reflects the current
         // swapchain, possibly recreated this frame)

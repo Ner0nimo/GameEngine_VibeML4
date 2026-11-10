@@ -1259,6 +1259,7 @@ void VulkanRenderer::set_shadow_cascade_count(u32 count) {
 
 void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
     (void)dt;
+    frame_rendered_ = false;
     if (!impl_ || !impl_->dev) return;
     auto& I = *impl_;
 
@@ -1310,26 +1311,32 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         const u32 rh = pending_height_;
         resize_pending_ = false;
         if (rw == 0 || rh == 0) return; // minimized: suspend rendering this frame
-        I.dev->waitForIdle();
-        I.destroySwapchainResources();
-        if (auto r = create_swapchain(I.physical, I.device, I.surface, I.window, I.swapchain,
-                                      I.swapFormat, I.swapExtent, I.swapImages);
-            !r.ok()) {
-            IGNIS_ERROR("swapchain recreation failed: {}", r.error());
-            resize_pending_ = true; // retry next frame
-            pending_width_ = rw;
-            pending_height_ = rh;
-            return;
+        // No-op guard: if the requested size already matches the swapchain, there
+        // is nothing to do. Without this, a persistently SUBOPTIMAL swapchain
+        // (acquire/present report it every frame) would recreate the swapchain
+        // every frame -> visible flicker.
+        if (rw != I.swapExtent.width || rh != I.swapExtent.height) {
+            I.dev->waitForIdle();
+            I.destroySwapchainResources();
+            if (auto r = create_swapchain(I.physical, I.device, I.surface, I.window, I.swapchain,
+                                          I.swapFormat, I.swapExtent, I.swapImages);
+                !r.ok()) {
+                IGNIS_ERROR("swapchain recreation failed: {}", r.error());
+                resize_pending_ = true; // retry next frame
+                pending_width_ = rw;
+                pending_height_ = rh;
+                return;
+            }
+            I.wrapSwapchainImages();
+            I.createTargets(I.swapExtent.width, I.swapExtent.height);
+            const Format nfmt = swapFormatToNvrhi(I.swapFormat);
+            if (nfmt != I.psoFormat) { // surface format changed: pipelines too
+                I.psoFormat = nfmt;
+                I.createPipelines(nfmt);
+            }
+            I.updateLightingSets();
+            IGNIS_INFO("swapchain recreated: {}x{}", I.swapExtent.width, I.swapExtent.height);
         }
-        I.wrapSwapchainImages();
-        I.createTargets(I.swapExtent.width, I.swapExtent.height);
-        const Format nfmt = swapFormatToNvrhi(I.swapFormat);
-        if (nfmt != I.psoFormat) { // surface format changed: pipelines too
-            I.psoFormat = nfmt;
-            I.createPipelines(nfmt);
-        }
-        I.updateLightingSets();
-        IGNIS_INFO("swapchain recreated: {}x{}", I.swapExtent.width, I.swapExtent.height);
     }
 
     // Acquire swapchain image (windowed) before recording. We wait on a fence
@@ -1341,7 +1348,8 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         VkResult acq = vkAcquireNextImageKHR(I.device, I.swapchain, UINT64_MAX, VK_NULL_HANDLE,
                                              I.inFlight, &swapIndex);
         if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
-            // Swapchain no longer matches the surface: schedule recreation.
+            // Swapchain no longer matches the surface: schedule recreation and
+            // skip this frame entirely (no present of a stale image).
             if (I.window) {
                 const FramebufferSize fb = I.window->framebuffer_size();
                 request_resize(fb.width, fb.height);
@@ -1352,12 +1360,20 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
             IGNIS_WARN("vkAcquireNextImageKHR failed: {}", static_cast<int>(acq));
             return;
         }
+        // SUBOPTIMAL still presents fine; only schedule recreation if the
+        // framebuffer size actually differs from the swapchain extent (a
+        // persistently suboptimal-but-matching swapchain must NOT trigger a
+        // per-frame recreate loop -> flicker).
         if (acq == VK_SUBOPTIMAL_KHR && I.window) {
             const FramebufferSize fb = I.window->framebuffer_size();
-            request_resize(fb.width, fb.height); // recreate on a later frame
+            if (fb.width != I.swapExtent.width || fb.height != I.swapExtent.height)
+                request_resize(fb.width, fb.height);
         }
         vkWaitForFences(I.device, 1, &I.inFlight, VK_TRUE, UINT64_MAX);
         vkResetFences(I.device, 1, &I.inFlight);
+        frame_rendered_ = true;
+    } else {
+        frame_rendered_ = true; // offscreen always "renders"
     }
 
     auto cl = I.dev->createCommandList();
@@ -1678,7 +1694,12 @@ void VulkanRenderer::present() {
     pi.pSwapchains = &I.swapchain;
     pi.pImageIndices = &last_swap_index_;
     const VkResult pr = vkQueuePresentKHR(I.queue, &pi);
-    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR ||
+        (pr == VK_SUBOPTIMAL_KHR && I.window &&
+         [&] {
+             const FramebufferSize fb = I.window->framebuffer_size();
+             return fb.width != I.swapExtent.width || fb.height != I.swapExtent.height;
+         }())) {
         // Never keep presenting on an outdated swapchain: schedule recreation.
         if (I.window) {
             const FramebufferSize fb = I.window->framebuffer_size();
