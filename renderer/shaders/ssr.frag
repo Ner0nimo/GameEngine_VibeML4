@@ -54,6 +54,14 @@ void main() {
     vec3 Rv = reflect(normalize(viewPos), Nv); // mirror dir in view space
     if (Rv.z >= -0.02) { rt_ssr = vec4(0.0); return; } // grazing / toward camera
 
+    // DEBUG: encode viewPos.z, sceneZ at v_uv, Rv.z into rgb
+    {
+        float sz = sceneViewZ(v_uv, depth);
+        rt_ssr = vec4(clamp(viewPos.z * 0.05 + 0.5, 0.0, 1.0),
+                      clamp(sz * 0.05 + 0.5, 0.0, 1.0),
+                      clamp(Rv.z + 0.5, 0.0, 1.0), 0.0);
+        return;
+    }
     vec3 V = normalize(ubo.camPos.xyz - worldPos);
     float NdotV = clamp(dot(N, V), 0.0, 1.0);
     // Start offset grows at grazing angles so the ray doesn't immediately

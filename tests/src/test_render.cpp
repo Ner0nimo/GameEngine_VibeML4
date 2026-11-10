@@ -436,6 +436,11 @@ TEST(Render, SSRReflectsScene) {
     std::fprintf(stderr, "ssr: lower with=%llu without=%llu upper with=%llu without=%llu\n",
                  static_cast<unsigned long long>(withSSR), static_cast<unsigned long long>(without),
                  static_cast<unsigned long long>(upperOn), static_cast<unsigned long long>(upperOff));
+    auto px = [](const std::vector<u8>& p, u32 x, u32 y) {
+        const size_t i = (static_cast<size_t>(y) * 64u + x) * 4u;
+        std::fprintf(stderr, "px(%u,%u)=(%u,%u,%u)\n", x, y, p[i], p[i + 1], p[i + 2]);
+    };
+    px(on, 32, 32); px(on, 32, 48); px(on, 32, 56);
     EXPECT_GT(withSSR, without + 300u) << "SSR must brighten the ground via the cube's reflection";
     // The upper half (sky + cube) should be roughly unchanged: reflections land on the ground.
     const i64 upperDiff = static_cast<i64>(upperOn) - static_cast<i64>(upperOff);
