@@ -235,7 +235,9 @@ TEST(Render, PointLightLightsCube) {
         }
         EntityId lamp = scene.world().create_entity("lamp");
         auto& lt = scene.world().emplace<TransformComponent>(lamp);
-        lt.position = {0.f, 0.5f, 1.5f}; // close to the cube's front face
+        // Behind the cube: the camera-visible face at the frame center has
+        // normal (0,0,-1) (back-face culling), so the light must sit behind.
+        lt.position = {0.f, 0.5f, -1.5f};
         auto& pl = scene.world().emplace<PointLightComponent>(lamp);
         pl.color = {1.f, 1.f, 1.f};
         pl.intensity = point_intensity;
@@ -262,10 +264,8 @@ TEST(Render, PointLightLightsCube) {
     };
     const u64 lit = total(withLight);
     const u64 dark = total(without);
-    const size_t ci = (32u * 64u + 32u) * 4u; // center: debug-encoded (worldPos.z+3, N.z+1, dist/2)
-    std::fprintf(stderr, "point light: total with=%llu without=%llu center RGB=(%u,%u,%u)\n",
-                 static_cast<unsigned long long>(lit), static_cast<unsigned long long>(dark),
-                 withLight[ci], withLight[ci + 1], withLight[ci + 2]);
+    std::fprintf(stderr, "point light: total with=%llu without=%llu\n",
+                 static_cast<unsigned long long>(lit), static_cast<unsigned long long>(dark));
     // Whole-frame sum is robust to per-pixel jitter on software rasterizers.
     EXPECT_GT(lit, dark + 2000u) << "point light must brighten the frame";
 }
