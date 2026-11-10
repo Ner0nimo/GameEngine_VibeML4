@@ -85,6 +85,10 @@ public:
     // cascading and uses a single shadow map (fallback / perf toggle).
     void set_shadow_cascade_count(u32 count);
 
+    // Bloom post-processing: enable/disable and tune strength (HDR, pre-tonemap)
+    // and luminance threshold. Defaults: on, strength 0.6, threshold 1.0.
+    void set_bloom(bool enabled, f32 strength = 0.6f, f32 threshold = 1.0f);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

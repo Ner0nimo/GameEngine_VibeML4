@@ -315,6 +315,50 @@ TEST(Render, CSMShadowsFarGeometry) {
     EXPECT_LT(shadowMin, litMax - 15u) << "far occluder must cast a shadow with 4 cascades";
 }
 
+// Bloom must add a measurable halo around the bright cube compared to bloom off.
+TEST(Render, BloomAddsHalo) {
+    if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
+    auto render = [](bool bloom) {
+        Scene scene = make_render_scene();
+        Camera camera;
+        camera.position = {0.f, 0.f, 3.f};
+        camera.fov_y_deg = 60.f;
+        VulkanRenderer renderer;
+        renderer.set_bloom(bloom, 0.8f, 1.0f);
+        if (!renderer.init_offscreen(64, 64).ok()) return std::vector<u8>{};
+        renderer.render(scene, camera, 1.f / 60.f);
+        auto rb = renderer.readback();
+        renderer.shutdown();
+        return rb.ok() ? std::move(rb.value()) : std::vector<u8>{};
+    };
+    const std::vector<u8> on = render(true);
+    const std::vector<u8> off = render(false);
+    ASSERT_EQ(on.size(), 64u * 64u * 4u);
+    ASSERT_EQ(off.size(), on.size());
+    // Average luminance in a ring just outside the cube (cube spans ~center 14..50).
+    auto ringAvg = [](const std::vector<u8>& px) {
+        u64 sum = 0;
+        u32 n = 0;
+        for (u32 y = 0; y < 64; ++y)
+            for (u32 x = 0; x < 64; ++x) {
+                const u32 dx = x > 32 ? x - 32 : 32 - x;
+                const u32 dy = y > 32 ? y - 32 : 32 - y;
+                const u32 d = std::max(dx, dy);
+                if (d >= 20 && d <= 24) {
+                    const size_t i = (static_cast<size_t>(y) * 64u + x) * 4u;
+                    sum += static_cast<u64>(px[i]) + static_cast<u64>(px[i + 1]) +
+                           static_cast<u64>(px[i + 2]);
+                    ++n;
+                }
+            }
+        return n == 0 ? 0u : static_cast<u32>(sum / n);
+    };
+    const u32 ringOn = ringAvg(on);
+    const u32 ringOff = ringAvg(off);
+    std::fprintf(stderr, "bloom ring: on=%u off=%u\n", ringOn, ringOff);
+    EXPECT_GT(ringOn, ringOff + 2u) << "bloom must brighten the ring around the cube";
+}
+
 TEST(Render, DebugLinesDrawn) {
     if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
     Scene scene("lines");
@@ -490,6 +534,9 @@ TEST(Render, PointLightLightsCube) {
     GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
 }
 TEST(Render, CSMShadowsFarGeometry) {
+    GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
+}
+TEST(Render, BloomAddsHalo) {
     GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
 }
 TEST(Render, DebugLinesDrawn) {
