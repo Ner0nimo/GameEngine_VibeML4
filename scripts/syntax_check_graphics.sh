@@ -16,7 +16,9 @@ SYSINCLUDES="-isystem $DEPS/glfw-src/include -isystem $DEPS/nvrhi-src/include \
  -isystem $DEPS/imgui-src -isystem $DEPS/imgui-src/backends \
  -isystem $DEPS/glm-src -isystem $DEPS/json-src/include -isystem $DEPS/cgltf-src \
  -isystem $DEPS/stb-src -isystem $DEPS/miniaudio-src -isystem $DEPS/lua-src \
- -isystem $DEPS/reactphysics3d-src/include"
+ -isystem $DEPS/reactphysics3d-src/include \
+ -isystem $DEPS/googletest-src/googletest/include \
+ -isystem $DEPS/googletest-src/googlemock/include"
 
 FLAGS="-std=c++20 -fPIC -fsyntax-only -DGLM_ENABLE_EXPERIMENTAL \
  -DIGNIS_WITH_GRAPHICS -DIGNIS_WINDOW_VULKAN -DIGNIS_RENDERER_VULKAN \
@@ -30,13 +32,14 @@ else
     FILES="$ROOT/window/src/window.cpp $ROOT/renderer/src/renderer.cpp \
 $ROOT/renderer/src/vulkan_renderer.cpp $ROOT/renderer/src/vulkan_passes.cpp \
 $ROOT/renderer/src/vulkan_dispatch.cpp $ROOT/renderer/src/ibl.cpp \
-$ROOT/renderer/src/shader_embed.cpp $ROOT/editor/src/main.cpp $ROOT/editor/src/editor_app.cpp"
+$ROOT/renderer/src/shader_embed.cpp $ROOT/editor/src/main.cpp $ROOT/editor/src/editor_app.cpp \
+$ROOT/tests/src/test_render.cpp"
 fi
 
 for f in $FILES; do
     echo "== $f"
     EXTRA=""
-    case "$f" in */editor/*) EXTRA="-DGLFW_INCLUDE_NONE" ;; esac
+    case "$f" in */editor/*|*/tests/*) EXTRA="-DGLFW_INCLUDE_NONE -DIGNIS_TEST_DATA_DIR=\"\\\"$ROOT/tests/data\\\"\" -DIGNIS_SCENES_DIR=\"\\\"$ROOT/scenes\\\"\" -DIGNIS_SCRIPTS_DIR=\"\\\"$ROOT/scripts\\\"\"" ;; esac
     /usr/bin/c++ $FLAGS $EXTRA $INCLUDES $SYSINCLUDES -c "$f" -o /dev/null
 done
 echo "ALL OK"

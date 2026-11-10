@@ -103,11 +103,18 @@ TEST(Render, RawVulkanSanity) {
     VkInstanceCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     ici.pApplicationInfo = &app;
-    ASSERT_EQ(vkCreateInstance(&ici, nullptr, &inst), VK_SUCCESS);
+    // A Vulkan loader can be present while no driver is usable (GPU-less CI
+    // runners: VK_ERROR_INCOMPATIBLE_DRIVER, zero devices) - skip, don't fail.
+    const VkResult irc = vkCreateInstance(&ici, nullptr, &inst);
+    if (irc != VK_SUCCESS)
+        GTEST_SKIP() << "no usable Vulkan driver (vkCreateInstance=" << static_cast<int>(irc) << ")";
     u32 n = 0;
     vkEnumeratePhysicalDevices(inst, &n, nullptr);
     std::fprintf(stderr, "ENUM count=%u\n", n);
-    ASSERT_GT(n, 0u);
+    if (n == 0) {
+        vkDestroyInstance(inst, nullptr);
+        GTEST_SKIP() << "Vulkan loader present but no physical devices (no GPU/driver)";
+    }
     std::vector<VkPhysicalDevice> devs(n);
     vkEnumeratePhysicalDevices(inst, &n, devs.data());
     std::fprintf(stderr, "ENUM wrote=%u first=%p\n", n, static_cast<void*>(devs[0]));
@@ -168,6 +175,7 @@ TEST(Render, RawVulkanSanity) {
 
 #ifdef IGNIS_RENDERER_VULKAN
 TEST(Render, OffscreenInitInProcess) {
+    if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
     std::vector<u8> px;
     ASSERT_TRUE(render_cube(px));
     std::fprintf(stderr, "render_cube ok, %zu bytes\n", px.size());
