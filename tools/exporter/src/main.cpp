@@ -31,27 +31,52 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// IGN-003: resource limits for export traversal - max files, max depth, and
+// per-file size is checked by PakWriter before reading. Exceeding a limit
+// aborts the export cleanly instead of exhausting memory.
+constexpr u32 kMaxExportFiles = 100000;
+constexpr u32 kMaxExportDepth = 32;
+
 // Collects regular files under dir, keeping only files that resolve (following
 // symlinks) inside root. Symlinked entries are never followed, so nothing
 // outside the export root can enter the package through path resolution.
-void collect_files(const fs::path& dir, const fs::path& root, std::vector<std::pair<std::string, fs::path>>& out) {
+// Returns false when a resource limit is hit (caller aborts the export).
+bool collect_files(const fs::path& dir, const fs::path& root,
+                   std::vector<std::pair<std::string, fs::path>>& out) {
     std::error_code ec;
-    if (!fs::exists(dir, ec)) return;
-    for (const auto& entry : fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec)) {
-        if (ec) return;
+    if (!fs::exists(dir, ec)) return true;
+    fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
+    const fs::recursive_directory_iterator end;
+    while (!ec && it != end) {
+        const auto& entry = *it;
+        bool keep = true;
+        if (it.depth() > static_cast<int>(kMaxExportDepth)) {
+            IGNIS_ERROR("export: directory nesting deeper than {} levels at '{}'", kMaxExportDepth,
+                        entry.path().string());
+            return false;
+        }
+        if (out.size() >= kMaxExportFiles) {
+            IGNIS_ERROR("export: more than {} files - aborting", kMaxExportFiles);
+            return false;
+        }
         if (entry.is_symlink()) {
             IGNIS_WARN("export: skipping symlink '{}'", entry.path().string());
-            continue;
+            keep = false;
+        } else if (entry.is_regular_file()) {
+            const fs::path canon = fs::weakly_canonical(entry.path(), ec);
+            if (ec || !is_path_within_root(root, canon)) {
+                IGNIS_WARN("export: skipping file outside export root '{}'", entry.path().string());
+                keep = false;
+                ec.clear();
+            } else {
+                const std::string rel = fs::relative(entry.path(), root).generic_string();
+                out.emplace_back(rel, entry.path());
+            }
         }
-        if (!entry.is_regular_file()) continue;
-        const fs::path canon = fs::weakly_canonical(entry.path(), ec);
-        if (ec || !is_path_within_root(root, canon)) {
-            IGNIS_WARN("export: skipping file outside export root '{}'", entry.path().string());
-            continue;
-        }
-        const std::string rel = fs::relative(entry.path(), root).generic_string();
-        out.emplace_back(rel, entry.path());
+        (void)keep;
+        it.increment(ec); // always advance, even for skipped entries
     }
+    return !ec;
 }
 
 } // namespace
@@ -125,7 +150,7 @@ int main(int argc, char** argv) {
     // is already packaged as scene.json - skip it if an include covers it.
     for (const auto& inc : includes) {
         std::vector<std::pair<std::string, fs::path>> files;
-        collect_files(inc, root, files);
+        if (!collect_files(inc, root, files)) return 1; // resource limit hit
         for (const auto& [rel, path] : files) {
             if (rel == "scene.json") {
                 IGNIS_WARN("export: skipping 'scene.json' from include (already packaged from --scene)");

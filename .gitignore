@@ -19,3 +19,4 @@ Thumbs.db
 .dist/
 logs/
 imgui.ini
+editor_window.json

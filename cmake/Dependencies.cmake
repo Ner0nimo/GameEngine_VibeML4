@@ -16,7 +16,7 @@ set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
 FetchContent_Declare(glm
     GIT_REPOSITORY https://github.com/g-truc/glm.git
-    GIT_TAG 1.0.3
+    GIT_TAG 8d1fd52e5ab5590e2c81768ace50c72bae28f2ed # was tag 1.0.3
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(glm)
 
@@ -28,7 +28,7 @@ target_compile_definitions(ignis_glm INTERFACE GLM_ENABLE_EXPERIMENTAL)
 
 FetchContent_Declare(json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.12.0
+    GIT_TAG 65ee68451d8eb2b5f3a30b410476ab83deb3289b # was tag v3.12.0
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(json)
 add_library(ignis_json INTERFACE)
@@ -36,7 +36,7 @@ target_include_directories(ignis_json SYSTEM INTERFACE "${json_SOURCE_DIR}/inclu
 
 FetchContent_Declare(googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.18.0
+    GIT_TAG 063de7e9578f82b369302001269680b4b1553359 # was tag v1.18.0
     GIT_SHALLOW TRUE)
 set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
@@ -45,7 +45,7 @@ FetchContent_MakeAvailable(googletest)
 # Lua has no CMake project of its own - build the interpreter core ourselves.
 FetchContent_Declare(lua
     GIT_REPOSITORY https://github.com/lua/lua.git
-    GIT_TAG v5.4.8
+    GIT_TAG 6e22fedb74cf0c9b6656e9fce8b7331db847c605 # was tag v5.4.8
     GIT_SHALLOW TRUE)
 FetchContent_GetProperties(lua)
 if(NOT lua_POPULATED)
@@ -68,11 +68,11 @@ add_library(lua::lua ALIAS lua_static)
 # Header-only single-file libraries
 FetchContent_Declare(miniaudio
     GIT_REPOSITORY https://github.com/mackron/miniaudio.git
-    GIT_TAG 0.11.26
+    GIT_TAG 877ea4a7c2601c7b0f2a44e83dfac42e6470fea6 # was tag 0.11.26
     GIT_SHALLOW TRUE)
 FetchContent_Declare(cgltf
     GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
-    GIT_TAG v1.15
+    GIT_TAG bbeb5b0b070ddacddac6852fb72143eb68454937 # was tag v1.15
     GIT_SHALLOW TRUE)
 FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
@@ -92,7 +92,7 @@ target_include_directories(ignis_stb_headers SYSTEM INTERFACE "${stb_SOURCE_DIR}
 # reactphysics3d - simple, CMake-based 3D physics library
 FetchContent_Declare(reactphysics3d
     GIT_REPOSITORY https://github.com/DanielChappuis/reactphysics3d.git
-    GIT_TAG v0.10.2
+    GIT_TAG cd958bbc0c6e84a869388cba6613f10cc645b3cb # was tag v0.10.2
     GIT_SHALLOW TRUE)
 set(BUILD_TESTBED OFF CACHE BOOL "" FORCE)
 set(BUILD_HELLO_WORLD OFF CACHE BOOL "" FORCE)
@@ -112,7 +112,7 @@ FetchContent_MakeAvailable(reactphysics3d)
 
 FetchContent_Declare(glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git
-    GIT_TAG 3.5.1
+    GIT_TAG 70a9bb3881fe80fd483236e2b203cb451c6ecf40 # was tag 3.5.1
     GIT_SHALLOW TRUE)
 FetchContent_Declare(nvrhi
     GIT_REPOSITORY https://github.com/NVIDIA-RTX/NVRHI.git
@@ -120,7 +120,7 @@ FetchContent_Declare(nvrhi
     GIT_SHALLOW TRUE)
 FetchContent_Declare(imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG v1.93.0
+    GIT_TAG c1aaac65e896a45f81f47a4d68f9959e0f86c859 # was tag v1.93.0
     GIT_SHALLOW TRUE)
 FetchContent_Declare(imguizmo
     GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
@@ -128,11 +128,11 @@ FetchContent_Declare(imguizmo
     GIT_SHALLOW FALSE) # small repo; pin the exact commit
 FetchContent_Declare(vulkan_headers_ignis
     GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
-    GIT_TAG vulkan-sdk-1.4.363.0
+    GIT_TAG 6802bb4733b63ed5efd3adb308a6c885ef180ea1 # was tag vulkan-sdk-1.4.363.0 (Vulkan-Headers)
     GIT_SHALLOW TRUE)
 FetchContent_Declare(spirv_headers
     GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git
-    GIT_TAG vulkan-sdk-1.4.363.0
+    GIT_TAG 496543121ce6419f23d6fa5d7194ba66c36212d2 # was tag vulkan-sdk-1.4.363.0 (SPIRV-Headers)
     GIT_SHALLOW TRUE)
 
 # These are only *populated* (sources fetched); their CMake projects are NOT

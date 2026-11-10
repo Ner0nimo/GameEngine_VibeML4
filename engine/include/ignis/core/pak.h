@@ -32,6 +32,11 @@ struct PakLimits {
 
 class PakWriter {
 public:
+    // IGN-003: resource limits enforced on every added entry (per-file size,
+    // total bytes, entry count) so an oversized project aborts cleanly instead
+    // of exhausting memory during export.
+    PakLimits limits;
+
     Result<void> add_file(const std::string& pak_path, const std::vector<u8>& data);
     Result<void> add_file_from_disk(const std::string& pak_path, const std::string& disk_path);
     Result<void> write(const std::string& out_path) const;
@@ -40,6 +45,7 @@ private:
     struct Entry { std::string pak_path; std::vector<u8> data; };
     std::vector<Entry> entries_;
     std::unordered_set<std::string> paths_;
+    u64 total_bytes_ = 0;
 };
 
 class PakReader {

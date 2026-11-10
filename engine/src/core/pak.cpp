@@ -98,16 +98,29 @@ Result<void> PakWriter::add_file(const std::string& pak_path, const std::vector<
         return Result<void>::failure("PakWriter: invalid pak path '" + pak_path + "'");
     if (paths_.contains(pak_path))
         return Result<void>::failure("PakWriter: duplicate pak path '" + pak_path + "'");
-    constexpr u64 kMaxEntries = 100000;
-    if (entries_.size() >= kMaxEntries)
+    if (entries_.size() >= limits.max_entries)
         return Result<void>::failure("PakWriter: too many entries (max " +
-                                     std::to_string(kMaxEntries) + ")");
+                                     std::to_string(limits.max_entries) + ")");
+    if (data.size() > limits.max_entry_bytes)
+        return Result<void>::failure("PakWriter: entry '" + pak_path + "' too large (max " +
+                                     std::to_string(limits.max_entry_bytes) + " bytes)");
+    if (total_bytes_ + data.size() > limits.max_total_bytes)
+        return Result<void>::failure("PakWriter: total payload too large (max " +
+                                     std::to_string(limits.max_total_bytes) + " bytes)");
     paths_.insert(pak_path);
+    total_bytes_ += data.size();
     entries_.push_back({pak_path, data});
     return Result<void>::success();
 }
 
 Result<void> PakWriter::add_file_from_disk(const std::string& pak_path, const std::string& disk_path) {
+    // Check the size BEFORE reading: never load an oversized file into memory.
+    std::error_code ec;
+    const auto fsize = std::filesystem::file_size(disk_path, ec);
+    if (ec) return Result<void>::failure("PakWriter: cannot stat '" + disk_path + "'");
+    if (static_cast<u64>(fsize) > limits.max_entry_bytes)
+        return Result<void>::failure("PakWriter: '" + disk_path + "' too large (max " +
+                                     std::to_string(limits.max_entry_bytes) + " bytes)");
     std::ifstream f(disk_path, std::ios::binary);
     if (!f) return Result<void>::failure("PakWriter: cannot read '" + disk_path + "'");
     std::ostringstream ss;
@@ -214,8 +227,11 @@ Result<void> PakReader::open(const std::string& path, const PakLimits& limits) {
             return Result<void>::failure("bad entry path '" + name + "' in '" + path + "'");
         if (!meta.is_object() || !meta.contains("offset") || !meta.contains("size"))
             return Result<void>::failure("entry '" + name + "' missing offset/size in '" + path + "'");
-        if (!meta["offset"].is_number() || !meta["size"].is_number())
-            return Result<void>::failure("entry '" + name + "' has non-numeric offset/size in '" + path + "'");
+        // IGN-005: require true unsigned integers - negative values, floats and
+        // out-of-range numbers must be rejected before any conversion to u64.
+        if (!meta["offset"].is_number_unsigned() || !meta["size"].is_number_unsigned())
+            return Result<void>::failure("entry '" + name +
+                                         "' offset/size must be unsigned integers in '" + path + "'");
         const u64 off = meta["offset"].get<u64>();
         const u64 size = meta["size"].get<u64>();
         if (off < 8 + static_cast<u64>(index_size))

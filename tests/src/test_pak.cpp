@@ -239,3 +239,54 @@ TEST(PakSecurity, ValidPakStillOpens) {
     EXPECT_EQ(std::string(out.value().begin(), out.value().end()), "hi");
     fs::remove(path);
 }
+
+TEST(PakSecurity, NonUnsignedOffsetSizeRejected) {
+    // IGN-005: negative, float and string offset/size must be rejected before
+    // any u64 conversion (is_number_unsigned), not silently converted.
+    const auto path = fs::temp_directory_path() / "ignis_sec_int.ignispak";
+    const std::string blob = "hello";
+    const std::string hash(64, 'a');
+    for (const char* bad : {"-5", "1.5", "\"8\"", "null", "true"}) {
+        nlohmann::json idx;
+        idx["files"]["a.txt"] = nlohmann::json::parse(
+            std::string("{\"offset\":") + bad + ",\"size\":5,\"sha256\":\"" + hash + "\"}");
+        write_pak(path, idx.dump(), blob);
+        PakReader r;
+        EXPECT_FALSE(r.open(path.string()).ok()) << "offset=" << bad << " must be rejected";
+    }
+    // Same for size.
+    for (const char* bad : {"-1", "2.5", "\"3\""}) {
+        nlohmann::json idx;
+        idx["files"]["a.txt"] = nlohmann::json::parse(
+            std::string("{\"offset\":100,\"size\":") + bad + ",\"sha256\":\"" + hash + "\"}");
+        write_pak(path, idx.dump(), blob);
+        PakReader r;
+        EXPECT_FALSE(r.open(path.string()).ok()) << "size=" << bad << " must be rejected";
+    }
+    fs::remove(path);
+}
+
+TEST(PakSecurity, WriterResourceLimitsEnforced) {
+    // IGN-003: oversized entries and oversized totals must abort cleanly,
+    // and add_file_from_disk must check the file size BEFORE reading it.
+    const auto path = fs::temp_directory_path() / "ignis_sec_big.bin";
+    { std::ofstream f(path, std::ios::binary); f << std::string(1024, 'x'); }
+
+    PakWriter w;
+    w.limits.max_entry_bytes = 512;
+    EXPECT_FALSE(w.add_file("big.bin", std::vector<u8>(1024, 'x')).ok()) << "oversized entry";
+    EXPECT_FALSE(w.add_file_from_disk("big.bin", path.string()).ok())
+        << "oversized disk file must be rejected before reading";
+
+    PakWriter w2;
+    w2.limits.max_total_bytes = 100;
+    EXPECT_TRUE(w2.add_file("a", std::vector<u8>(60, 'a')).ok());
+    EXPECT_FALSE(w2.add_file("b", std::vector<u8>(60, 'b')).ok()) << "total over budget";
+
+    PakWriter w3;
+    w3.limits.max_entries = 2;
+    EXPECT_TRUE(w3.add_file("a", {'x'}).ok());
+    EXPECT_TRUE(w3.add_file("b", {'y'}).ok());
+    EXPECT_FALSE(w3.add_file("c", {'z'}).ok()) << "entry count cap";
+    fs::remove(path);
+}
