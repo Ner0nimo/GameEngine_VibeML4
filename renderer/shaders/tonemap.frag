@@ -17,13 +17,10 @@ layout(set = 0, binding = 4) uniform texture2D tex_bloom3;
 layout(set = 0, binding = 132) uniform sampler samp_bloom3;
 layout(set = 0, binding = 5) uniform texture2D tex_bloom4;
 layout(set = 0, binding = 133) uniform sampler samp_bloom4;
-layout(set = 0, binding = 6) uniform texture2D tex_ssr; // screen-space reflections
-layout(set = 0, binding = 134) uniform sampler samp_ssr;
-layout(set = 0, binding = 263) uniform UniformBuffer {
+layout(set = 0, binding = 262) uniform UniformBuffer {
     float exposure;
     float bloomStrength; // 0 disables bloom
-    float ssrStrength;   // 0 disables the SSR add
-    float _padB;
+    float _padA, _padB;
     vec4 clearColor; // applied where alpha/hdr is background
 } ubo;
 
@@ -35,9 +32,6 @@ vec3 aces(vec3 x) {
 
 void main() {
     vec3 hdr = texture(sampler2D(tex_hdr, samp_hdr), v_uv).rgb;
-    // SSR reflections add in HDR, before tonemapping.
-    if (ubo.ssrStrength > 0.0)
-        hdr += ubo.ssrStrength * texture(sampler2D(tex_ssr, samp_ssr), v_uv).rgb;
     // Bloom is composited in HDR, before tonemapping. Guard on bloomStrength so
     // a disabled bloom never samples the (then unwritten) bloom targets.
     if (ubo.bloomStrength > 0.0) {

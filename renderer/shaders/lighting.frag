@@ -24,6 +24,12 @@ layout(set = 0, binding = 8) uniform textureCube tex_prefilter; // mipmapped rad
 layout(set = 0, binding = 136) uniform sampler samp_prefilter;
 layout(set = 0, binding = 9) uniform texture2D tex_brdf; // RG LUT: (scale, bias) by (NdotV, roughness)
 layout(set = 0, binding = 137) uniform sampler samp_brdf;
+layout(set = 0, binding = 10) uniform texture2D tex_ssr; // rgba16f: rgb = reflected color, a = confidence
+layout(set = 0, binding = 138) uniform sampler samp_ssr;
+
+layout(set = 2, binding = 256) uniform SSRParams {
+    vec4 params; // x = ssr enabled, y = ssr strength
+} ssrParams;
 
 layout(set = 1, binding = 256) uniform UniformBuffer {
     vec3 camPos;
@@ -242,6 +248,12 @@ void main() {
     vec3 prefiltered = textureLod(samplerCube(tex_prefilter, samp_prefilter), R, roughness * maxLod).rgb;
     vec2 brdf = texture(sampler2D(tex_brdf, samp_brdf), vec2(NdotV, roughness)).rg;
     vec3 ambientSpec = prefiltered * (Famb * brdf.x + brdf.y);
+    // SSR replaces the IBL specular where a confident hit exists (blend by
+    // confidence, never add both), using the same BRDF/Fresnel weighting.
+    vec4 ssr = texture(sampler2D(tex_ssr, samp_ssr), v_uv);
+    float ssrConf = clamp(ssr.a * ssrParams.params.y * ssrParams.params.x, 0.0, 1.0);
+    vec3 ssrSpec = ssr.rgb * (Famb * brdf.x + brdf.y);
+    ambientSpec = mix(ambientSpec, ssrSpec, ssrConf);
     vec3 ambient = (ambientDiffuse + ambientSpec) * ao * ssao * ubo.ambientStrength;
 
     vec3 color = ambient + direct + emissive;

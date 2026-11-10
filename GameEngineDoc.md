@@ -59,9 +59,12 @@ We're building a production-grade, simple and straight-forward 3D Game Engine fo
 - Good SSAO
 - HDR pipeline with bloom (multi-level mip chain, composited pre-tonemap) and
   ACES tonemapping; `VulkanRenderer::set_bloom()` tunes it
-- Screen-space reflections (view-space ray march + binary refine, confidence
-  blend over IBL) via `VulkanRenderer::set_ssr()`; Hi-Z coarse pass can later
-  replace the linear march in `ssr.frag` without changing the blend logic
+- Screen-space reflections (`ssr.frag`): pre-lighting view-space ray march
+  (sign-change crossing + binary refine) against the G-buffer depth, sampling
+  the previous frame's lit HDR as the reflection color, replacing the IBL
+  specular by hit confidence in the lighting pass; `VulkanRenderer::set_ssr()`
+  tunes it. Hi-Z coarse pass / roughness mip blur can later replace the linear
+  march in `ssr.frag` without changing hit/refine/blend logic
 
 ## 3D Physics
 - Use simple 3D physics library of your choosing

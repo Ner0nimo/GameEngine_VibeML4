@@ -405,6 +405,8 @@ TEST(Render, SSRReflectsScene) {
         VulkanRenderer renderer;
         if (!renderer.init_offscreen(64, 64).ok()) return std::vector<u8>{};
         renderer.set_ssr(ssr, 2.0f);
+        // Two frames: SSR samples the previous frame's lit HDR.
+        renderer.render(scene, camera, 1.f / 60.f);
         renderer.render(scene, camera, 1.f / 60.f);
         auto rb = renderer.readback();
         renderer.shutdown();
@@ -414,20 +416,26 @@ TEST(Render, SSRReflectsScene) {
     const std::vector<u8> off = render(false);
     ASSERT_EQ(on.size(), 64u * 64u * 4u);
     ASSERT_EQ(off.size(), on.size());
-    auto lowerHalf = [](const std::vector<u8>& px) {
+    auto half = [](const std::vector<u8>& px, bool lower) {
         u64 sum = 0;
-        for (u32 y = 32; y < 64; ++y)
+        for (u32 y = lower ? 32 : 0; y < (lower ? 64 : 32); ++y)
             for (u32 x = 0; x < 64; ++x) {
                 const size_t i = (static_cast<size_t>(y) * 64u + x) * 4u;
                 sum += static_cast<u64>(px[i]) + static_cast<u64>(px[i + 1]) + static_cast<u64>(px[i + 2]);
             }
         return sum;
     };
-    const u64 withSSR = lowerHalf(on);
-    const u64 without = lowerHalf(off);
-    std::fprintf(stderr, "ssr: lower-half with=%llu without=%llu\n",
-                 static_cast<unsigned long long>(withSSR), static_cast<unsigned long long>(without));
+    const u64 withSSR = half(on, true);
+    const u64 without = half(off, true);
+    const u64 upperOn = half(on, false);
+    const u64 upperOff = half(off, false);
+    std::fprintf(stderr, "ssr: lower with=%llu without=%llu upper with=%llu without=%llu\n",
+                 static_cast<unsigned long long>(withSSR), static_cast<unsigned long long>(without),
+                 static_cast<unsigned long long>(upperOn), static_cast<unsigned long long>(upperOff));
     EXPECT_GT(withSSR, without + 300u) << "SSR must brighten the ground via the cube's reflection";
+    // The upper half (sky + cube) should be roughly unchanged: reflections land on the ground.
+    const i64 upperDiff = static_cast<i64>(upperOn) - static_cast<i64>(upperOff);
+    EXPECT_LT(std::abs(upperDiff), 2000);
 }
 
 TEST(Render, DebugLinesDrawn) {

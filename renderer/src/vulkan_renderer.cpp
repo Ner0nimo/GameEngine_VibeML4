@@ -158,8 +158,7 @@ struct BlurUBO {
 struct TonemapUBO {
     f32 exposure;
     f32 bloomStrength; // 0 disables bloom
-    f32 ssrStrength;   // 0 disables the SSR add
-    f32 _padB;
+    f32 _padA, _padB;
     alignas(16) math::Vec4 clearColor;
 };
 static_assert(sizeof(TonemapUBO) == 32, "TonemapUBO/std140 layout drifted");
@@ -171,13 +170,14 @@ struct BloomUBO {
     f32 _p0, _p1;
 };
 
-// SSR pass constants (own UBO so LightUBO stays untouched).
+// SSR pass constants (own UBO so LightUBO stays untouched). params is first
+// so lighting.frag can bind a 16-byte prefix block at its own set.
 struct SSRUBO {
+    alignas(16) math::Vec4 params;   // x = enabled, y = strength, z = max roughness, w = max ray dist
+    alignas(16) math::Vec4 camPos;   // xyz = camera position, w = 1
     alignas(16) math::Mat4 camView;
     alignas(16) math::Mat4 camProj;
     alignas(16) math::Mat4 camInvProj;
-    alignas(16) math::Vec4 camPos;   // xyz = camera position
-    alignas(16) math::Vec4 params;   // x = enabled, y = strength, z = max roughness, w = max ray dist
 };
 static_assert(sizeof(SSRUBO) == 224, "SSRUBO/std140 layout drifted");
 
@@ -438,7 +438,7 @@ struct VulkanRenderer::Impl {
 
     BindingLayoutHandle layoutPushGbuffer, layoutMaterial, layoutPushShadow, layoutPushLine,
         layoutSSAO, layoutBlur, layoutLightingTex, layoutLightingUBO, layoutTonemap,
-        layoutBloomBright, layoutBloomBlur, layoutSSR;
+        layoutBloomBright, layoutBloomBlur, layoutSSR, layoutSSRParams;
     BindingSetHandle setPushGbuffer, setPushShadow, setPushLine; // empty sets for push-only layouts
 
     TextureHandle texAlbedo, texNormal, texORM, texEmissive, texWorldPos, texDepth;
@@ -448,8 +448,9 @@ struct VulkanRenderer::Impl {
     u32 shadowCascadeCount = kCascadeCount; // 1..kCascadeCount; 1 = single-map fallback
     TextureHandle texSSAO, texSSAOBlurred;
     FramebufferHandle fbSSAO, fbBlur;
-    TextureHandle texHDR;
-    FramebufferHandle fbLighting;
+    std::array<TextureHandle, 2> texHDR; // ping-pong: [hdrIndex] = current lighting output
+    std::array<FramebufferHandle, 2> fbLighting;
+    u32 hdrIndex = 0;
     std::array<TextureHandle, kBloomLevels> texBloom;
     std::array<FramebufferHandle, kBloomLevels> fbBloom;
     TextureHandle texSSR;
@@ -502,8 +503,9 @@ struct VulkanRenderer::Impl {
     TextureHandle texPrefilterCube, texBrdfLUT;
 
     BufferHandle cbLight, cbSSAO, cbBlur, cbTonemap, cbBloom, cbSSR, cbDummy;
-    BindingSetHandle setSSAO, setBlur, setLightingTex, setLightingUBO, setTonemap, setBloomBright,
-        setSSR;
+    BindingSetHandle setSSAO, setBlur, setLightingTex, setLightingUBO, setSSRParams;
+    // Per-HDR-target sets (ping-pong): index = hdrIndex.
+    std::array<BindingSetHandle, 2> setTonemap, setBloomBright, setSSR;
     std::array<BindingSetHandle, kBloomLevels - 1> setBloomDown; // [i-1] = source of downsample level i
     // Post settings (set via VulkanRenderer::set_bloom).
     bool bloomEnabled = true;
@@ -512,6 +514,8 @@ struct VulkanRenderer::Impl {
     f32 bloomKnee = 0.5f;
     bool ssrEnabled = true;
     f32 ssrStrength = 1.0f;
+    f32 ssrMaxRoughness = 0.85f;
+    f32 ssrMaxDist = 40.f;
 
     struct GpuPrimitive { u32 firstIndex; u32 indexCount; u32 materialIndex; };
     struct GpuMesh { BufferHandle vb, ib; std::vector<GpuPrimitive> prims; u32 indexCount = 0; };
@@ -686,10 +690,19 @@ struct VulkanRenderer::Impl {
         fbb.addColorAttachment(texSSAOBlurred);
         fbBlur = dev->createFramebuffer(fbb);
 
-        texHDR = createTex2D(w, h, Format::RGBA16_FLOAT, true, "hdr");
-        FramebufferDesc fbl;
-        fbl.addColorAttachment(texHDR);
-        fbLighting = dev->createFramebuffer(fbl);
+        // Ping-pong HDR targets: lighting writes texHDR[hdrIndex], SSR reads
+        // the other one (last frame's lit scene) as the reflection source.
+        for (u32 i = 0; i < 2; ++i) {
+            texHDR[i] = createTex2D(w, h, Format::RGBA16_FLOAT, true, "hdr");
+            FramebufferDesc fbl;
+            fbl.addColorAttachment(texHDR[i]);
+            fbLighting[i] = dev->createFramebuffer(fbl);
+        }
+        hdrIndex = 0;
+        runOneShot([&](ICommandList* cl) {
+            for (u32 i = 0; i < 2; ++i)
+                cl->clearTextureFloat(texHDR[i], TextureSubresourceSet(), Color(0.f, 0.f, 0.f, 1.f));
+        });
 
         // SSR reflection output (reflected scene color * confidence * F0).
         texSSR = createTex2D(w, h, Format::RGBA16_FLOAT, true, "ssr");
@@ -787,17 +800,19 @@ struct VulkanRenderer::Impl {
         layoutBlur = makeLayout({BindingLayoutItem::Texture_SRV(0), BindingLayoutItem::Sampler(0),
                                  BindingLayoutItem::ConstantBuffer(1)},
                                 ShaderType::Pixel);
-        layoutLightingTex = makeLayout(texSlots(10, 0), ShaderType::Pixel); // 0-6 gbuffer/shadow, 7 irradiance, 8 prefilter, 9 brdf LUT
+        layoutLightingTex = makeLayout(texSlots(11, 0), ShaderType::Pixel); // 0-6 gbuffer/shadow, 7 irradiance, 8 prefilter, 9 brdf LUT, 10 ssr
         layoutLightingUBO = makeLayout({BindingLayoutItem::ConstantBuffer(0)}, ShaderType::Pixel);
-        // Tonemap: slot 0 = HDR, slots 1..kBloomLevels = bloom chain, slot
-        // 1+kBloomLevels = SSR, CB at slot 2+kBloomLevels (shader binding 263).
-        std::vector<BindingLayoutItem> tonemapSlots = texSlots(2 + kBloomLevels, 0);
-        tonemapSlots.push_back(BindingLayoutItem::ConstantBuffer(2 + kBloomLevels));
+        // Tonemap: slot 0 = HDR, slots 1..kBloomLevels = bloom chain,
+        // CB at slot 1+kBloomLevels (shader binding 262).
+        std::vector<BindingLayoutItem> tonemapSlots = texSlots(1 + kBloomLevels, 0);
+        tonemapSlots.push_back(BindingLayoutItem::ConstantBuffer(1 + kBloomLevels));
         layoutTonemap = makeLayout(tonemapSlots, ShaderType::Pixel);
-        // SSR: slots 0..5 = hdr/depth/normal/orm/worldPos/albedo, CB slot 6 (261).
-        std::vector<BindingLayoutItem> ssrSlots = texSlots(6, 0);
-        ssrSlots.push_back(BindingLayoutItem::ConstantBuffer(6));
+        // SSR: slots 0..4 = prevHDR/depth/normal/orm/worldPos, CB slot 5 (261).
+        std::vector<BindingLayoutItem> ssrSlots = texSlots(5, 0);
+        ssrSlots.push_back(BindingLayoutItem::ConstantBuffer(5));
         layoutSSR = makeLayout(ssrSlots, ShaderType::Pixel);
+        // lighting.frag binds the SSR params prefix block as its own set 2.
+        layoutSSRParams = makeLayout({BindingLayoutItem::ConstantBuffer(0)}, ShaderType::Pixel);
         layoutBloomBright = makeLayout({BindingLayoutItem::Texture_SRV(0), BindingLayoutItem::Sampler(0),
                                         BindingLayoutItem::ConstantBuffer(1)},
                                        ShaderType::Pixel);
@@ -827,8 +842,8 @@ struct VulkanRenderer::Impl {
         psoBlur = makePso(shFullscreenVert, shBlurFrag, nullptr, {layoutBlur}, fbR8,
                           false, false, RasterCullMode::None, 0.f);
         psoLighting = makePso(shFullscreenVert, shLightingFrag, nullptr,
-                              {layoutLightingTex, layoutLightingUBO}, fbHDR, false, false,
-                              RasterCullMode::None, 0.f);
+                              {layoutLightingTex, layoutLightingUBO, layoutSSRParams}, fbHDR, false,
+                              false, RasterCullMode::None, 0.f);
         psoTonemap = makePso(shFullscreenVert, shTonemapFrag, nullptr, {layoutTonemap}, fbFinal,
                              false, false, RasterCullMode::None, 0.f);
         psoBloomBright = makePso(shFullscreenVert, shBloomBrightFrag, nullptr, {layoutBloomBright},
@@ -970,7 +985,9 @@ struct VulkanRenderer::Impl {
             BindingSetItem::Texture_SRV(7, texIrradianceCube), BindingSetItem::Sampler(7, sampLinear),
             BindingSetItem::Texture_SRV(8, texPrefilterCube), BindingSetItem::Sampler(8, sampPrefilter),
             BindingSetItem::Texture_SRV(9, texBrdfLUT), BindingSetItem::Sampler(9, sampLinear),
+            BindingSetItem::Texture_SRV(10, texSSR), BindingSetItem::Sampler(10, sampLinear),
         });
+        setSSRParams = makeSet(layoutSSRParams, {BindingSetItem::ConstantBuffer(0, cbSSR)});
         setLightingUBO = makeSet(layoutLightingUBO, {BindingSetItem::ConstantBuffer(0, cbLight)});
         setSSAO = makeSet(layoutSSAO, {
             BindingSetItem::Texture_SRV(0, texDepth), BindingSetItem::Sampler(0, sampNearest),
@@ -981,32 +998,33 @@ struct VulkanRenderer::Impl {
             BindingSetItem::Texture_SRV(0, texSSAO), BindingSetItem::Sampler(0, sampLinear),
             BindingSetItem::ConstantBuffer(1, cbBlur),
         });
-        setTonemap = makeSet(layoutTonemap, [&] {
-            std::vector<BindingSetItem> items;
-            items.push_back(BindingSetItem::Texture_SRV(0, texHDR));
-            items.push_back(BindingSetItem::Sampler(0, sampLinear));
-            for (u32 i = 0; i < kBloomLevels; ++i) {
-                items.push_back(BindingSetItem::Texture_SRV(1 + i, texBloom[i]));
-                items.push_back(BindingSetItem::Sampler(1 + i, sampLinear));
-            }
-            items.push_back(BindingSetItem::Texture_SRV(1 + kBloomLevels, texSSR));
-            items.push_back(BindingSetItem::Sampler(1 + kBloomLevels, sampLinear));
-            items.push_back(BindingSetItem::ConstantBuffer(2 + kBloomLevels, cbTonemap));
-            return items;
-        }());
-        setSSR = makeSet(layoutSSR, {
-            BindingSetItem::Texture_SRV(0, texHDR), BindingSetItem::Sampler(0, sampLinear),
-            BindingSetItem::Texture_SRV(1, texDepth), BindingSetItem::Sampler(1, sampNearest),
-            BindingSetItem::Texture_SRV(2, texNormal), BindingSetItem::Sampler(2, sampNearest),
-            BindingSetItem::Texture_SRV(3, texORM), BindingSetItem::Sampler(3, sampNearest),
-            BindingSetItem::Texture_SRV(4, texWorldPos), BindingSetItem::Sampler(4, sampNearest),
-            BindingSetItem::Texture_SRV(5, texAlbedo), BindingSetItem::Sampler(5, sampLinear),
-            BindingSetItem::ConstantBuffer(6, cbSSR),
-        });
-        setBloomBright = makeSet(layoutBloomBright, {
-            BindingSetItem::Texture_SRV(0, texHDR), BindingSetItem::Sampler(0, sampLinear),
-            BindingSetItem::ConstantBuffer(1, cbBloom),
-        });
+        // Per-HDR-target sets (index = hdrIndex).
+        for (u32 i = 0; i < 2; ++i) {
+            setTonemap[i] = makeSet(layoutTonemap, [&] {
+                std::vector<BindingSetItem> items;
+                items.push_back(BindingSetItem::Texture_SRV(0, texHDR[i]));
+                items.push_back(BindingSetItem::Sampler(0, sampLinear));
+                for (u32 b = 0; b < kBloomLevels; ++b) {
+                    items.push_back(BindingSetItem::Texture_SRV(1 + b, texBloom[b]));
+                    items.push_back(BindingSetItem::Sampler(1 + b, sampLinear));
+                }
+                items.push_back(BindingSetItem::ConstantBuffer(1 + kBloomLevels, cbTonemap));
+                return items;
+            }());
+            setBloomBright[i] = makeSet(layoutBloomBright, {
+                BindingSetItem::Texture_SRV(0, texHDR[i]), BindingSetItem::Sampler(0, sampLinear),
+                BindingSetItem::ConstantBuffer(1, cbBloom),
+            });
+            // SSR reads the OTHER hdr target (last frame's lit scene).
+            setSSR[i] = makeSet(layoutSSR, {
+                BindingSetItem::Texture_SRV(0, texHDR[1 - i]), BindingSetItem::Sampler(0, sampLinear),
+                BindingSetItem::Texture_SRV(1, texDepth), BindingSetItem::Sampler(1, sampNearest),
+                BindingSetItem::Texture_SRV(2, texNormal), BindingSetItem::Sampler(2, sampNearest),
+                BindingSetItem::Texture_SRV(3, texORM), BindingSetItem::Sampler(3, sampNearest),
+                BindingSetItem::Texture_SRV(4, texWorldPos), BindingSetItem::Sampler(4, sampNearest),
+                BindingSetItem::ConstantBuffer(5, cbSSR),
+            });
+        }
         for (u32 i = 1; i < kBloomLevels; ++i) {
             // Downsample level i reads level i-1.
             setBloomDown[i - 1] = makeSet(layoutBloomBlur, {
@@ -1128,6 +1146,8 @@ Result<void> VulkanRenderer::init(Window* window) {
     impl_->bloomKnee = bloom_knee_;
     impl_->ssrEnabled = ssr_enabled_;
     impl_->ssrStrength = ssr_strength_;
+    impl_->ssrMaxRoughness = ssr_max_roughness_;
+    impl_->ssrMaxDist = ssr_max_dist_;
     auto& I = *impl_;
     I.offscreen = wasOffscreen;
     I.window = window;
@@ -1385,12 +1405,16 @@ void VulkanRenderer::set_bloom(bool enabled, f32 strength, f32 threshold, f32 kn
     }
 }
 
-void VulkanRenderer::set_ssr(bool enabled, f32 strength) {
+void VulkanRenderer::set_ssr(bool enabled, f32 strength, f32 maxRoughness, f32 maxDist) {
     ssr_enabled_ = enabled;
     ssr_strength_ = glm::clamp(strength, 0.f, 4.f);
+    ssr_max_roughness_ = glm::clamp(maxRoughness, 0.04f, 1.f);
+    ssr_max_dist_ = glm::clamp(maxDist, 1.f, 500.f);
     if (impl_) {
         impl_->ssrEnabled = ssr_enabled_;
         impl_->ssrStrength = ssr_strength_;
+        impl_->ssrMaxRoughness = ssr_max_roughness_;
+        impl_->ssrMaxDist = ssr_max_dist_;
     }
 }
 
@@ -1613,7 +1637,6 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         TonemapUBO tu{};
         tu.exposure = 1.f;
         tu.bloomStrength = I.bloomEnabled ? I.bloomStrength : 0.f;
-        tu.ssrStrength = I.ssrEnabled ? I.ssrStrength : 0.f;
         tu.clearColor = math::Vec4(0.02f, 0.02f, 0.03f, 1.f);
         for (EntityId e : scene.world().view<CameraComponent>()) {
             if (const auto* c = scene.world().get<CameraComponent>(e)) {
@@ -1625,11 +1648,11 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
     }
     {
         SSRUBO su{};
+        su.params = math::Vec4(I.ssrEnabled ? 1.f : 0.f, I.ssrStrength, I.ssrMaxRoughness, I.ssrMaxDist);
+        su.camPos = math::Vec4(camera.position, 1.f);
         su.camView = view;
         su.camProj = proj;
         su.camInvProj = invProj;
-        su.camPos = math::Vec4(camera.position, 0.f);
-        su.params = math::Vec4(I.ssrEnabled ? 1.f : 0.f, I.ssrStrength, 0.85f, 40.f);
         cl->writeBuffer(I.cbSSR, &su, sizeof(su));
     }
 
@@ -1760,13 +1783,14 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         cl->draw(args);
     }
 
-    // --- lighting (HDR) ------------------------------------------------------------
+    // --- SSR (pre-lighting): trace against the G-buffer depth, sample last frame's
+    // lit HDR as the reflection color, output (color, confidence). Always runs;
+    // the shader writes zero confidence when disabled.
     {
         GraphicsState gs;
-        gs.setPipeline(I.psoLighting);
-        gs.setFramebuffer(I.fbLighting);
-        gs.addBindingSet(I.setLightingTex);
-        gs.addBindingSet(I.setLightingUBO);
+        gs.setPipeline(I.psoSSR);
+        gs.setFramebuffer(I.fbSSR);
+        gs.addBindingSet(I.setSSR[I.hdrIndex]); // reads texHDR[1 - hdrIndex] (previous frame)
         setViewport(gs);
         cl->setGraphicsState(gs);
         DrawArguments args;
@@ -1774,19 +1798,19 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         cl->draw(args);
     }
 
-    // --- SSR: trace reflections of the lit scene against the G-buffer depth -----------
-    if (I.ssrEnabled) {
+    // --- lighting (HDR) ------------------------------------------------------------
+    {
         GraphicsState gs;
-        gs.setPipeline(I.psoSSR);
-        gs.setFramebuffer(I.fbSSR);
-        gs.addBindingSet(I.setSSR);
+        gs.setPipeline(I.psoLighting);
+        gs.setFramebuffer(I.fbLighting[I.hdrIndex]);
+        gs.addBindingSet(I.setLightingTex);
+        gs.addBindingSet(I.setLightingUBO);
+        gs.addBindingSet(I.setSSRParams);
         setViewport(gs);
         cl->setGraphicsState(gs);
         DrawArguments args;
         args.vertexCount = 3;
         cl->draw(args);
-    } else {
-        cl->clearTextureFloat(I.texSSR, TextureSubresourceSet(), Color(0.f, 0.f, 0.f, 1.f));
     }
 
     // --- bloom chain (HDR, before tonemap) -------------------------------------------
@@ -1804,7 +1828,7 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
             GraphicsState gs;
             gs.setPipeline(I.psoBloomBright);
             gs.setFramebuffer(I.fbBloom[0]);
-            gs.addBindingSet(I.setBloomBright);
+            gs.addBindingSet(I.setBloomBright[I.hdrIndex]);
             ViewportState vs;
             vs.addViewportAndScissorRect(Viewport(static_cast<f32>(std::max(w >> 1, 1u)),
                                                    static_cast<f32>(std::max(h >> 1, 1u))));
@@ -1839,7 +1863,7 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         GraphicsState gs;
         gs.setPipeline(I.psoTonemap);
         gs.setFramebuffer(fbFinal);
-        gs.addBindingSet(I.setTonemap);
+        gs.addBindingSet(I.setTonemap[I.hdrIndex]);
         setViewport(gs);
         cl->setGraphicsState(gs);
         DrawArguments args;
@@ -1882,6 +1906,7 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
     // draw its UI on the swapchain image in between.
     I.dev->waitForIdle();
     last_swap_index_ = swapIndex;
+    I.hdrIndex = 1 - I.hdrIndex; // next frame's SSR reads this frame's lighting output
 
     stats_.draw_calls = static_cast<u32>(draws.size());
     stats_.triangles = 0;
