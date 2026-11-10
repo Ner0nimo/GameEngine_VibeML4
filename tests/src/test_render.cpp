@@ -258,10 +258,6 @@ TEST(Render, PointLightLightsCube) {
             sum += static_cast<u64>(px[i]) + static_cast<u64>(px[i + 1]) + static_cast<u64>(px[i + 2]);
         return sum;
     };
-    auto center = [](const std::vector<u8>& px) {
-        const size_t i = (32u * 64u + 32u) * 4u;
-        return static_cast<u32>(px[i]) + px[i + 1] + px[i + 2];
-    };
     const u64 lit = total(withLight);
     const u64 dark = total(without);
     const size_t ci = (32u * 64u + 32u) * 4u; // center: debug-encoded (worldPos.z+3, N.z+1, dist/2)

@@ -244,6 +244,8 @@ void main() {
     vec3 ambientSpec = prefiltered * (Famb * brdf.x + brdf.y);
     vec3 ambient = (ambientDiffuse + ambientSpec) * ao * ssao * ubo.ambientStrength;
 
-    vec3 color = ambient + direct + emissive;
+    // DEBUG: encode worldPos.z (red, +3), N.z (green, +1), light dist (blue, *0.5, clamped 2)
+    vec3 color = vec3(worldPos.z + 3.0, N.z + 1.0,
+                      clamp(length(ubo.pointPosRange[0].xyz - worldPos), 0.0, 2.0) * 0.5);
     rt_hdr = vec4(color, 1.0);
 }
