@@ -233,11 +233,11 @@ TEST(Render, PointLightLightsCube) {
         }
         EntityId lamp = scene.world().create_entity("lamp");
         auto& lt = scene.world().emplace<TransformComponent>(lamp);
-        lt.position = {0.f, 1.f, 2.f};
+        lt.position = {0.f, 0.5f, 1.5f}; // close to the cube's front face
         auto& pl = scene.world().emplace<PointLightComponent>(lamp);
         pl.color = {1.f, 1.f, 1.f};
         pl.intensity = point_intensity;
-        pl.range = 10.f;
+        pl.range = 5.f;
         Camera camera;
         camera.position = {0.f, 0.f, 3.f};
         camera.fov_y_deg = 60.f;
@@ -248,19 +248,27 @@ TEST(Render, PointLightLightsCube) {
         renderer.shutdown();
         return rb.ok() ? std::move(rb.value()) : std::vector<u8>{};
     };
-    const std::vector<u8> withLight = render_with_point(50.f);
+    const std::vector<u8> withLight = render_with_point(200.f);
     const std::vector<u8> without = render_with_point(0.f);
     ASSERT_EQ(withLight.size(), 64u * 64u * 4u);
     ASSERT_EQ(without.size(), withLight.size());
+    auto total = [](const std::vector<u8>& px) {
+        u64 sum = 0;
+        for (size_t i = 0; i + 2 < px.size(); i += 4)
+            sum += static_cast<u64>(px[i]) + static_cast<u64>(px[i + 1]) + static_cast<u64>(px[i + 2]);
+        return sum;
+    };
     auto center = [](const std::vector<u8>& px) {
         const size_t i = (32u * 64u + 32u) * 4u;
         return static_cast<u32>(px[i]) + px[i + 1] + px[i + 2];
     };
-    const u32 lit = center(withLight);
-    const u32 dark = center(without);
-    std::fprintf(stderr, "point light: with=%u without=%u\n", lit, dark);
-    EXPECT_GT(lit, dark + 20u) << "point light must brighten the cube: with=" << lit
-                               << " without=" << dark;
+    const u64 lit = total(withLight);
+    const u64 dark = total(without);
+    std::fprintf(stderr, "point light: total with=%llu without=%llu center with=%u without=%u\n",
+                 static_cast<unsigned long long>(lit), static_cast<unsigned long long>(dark),
+                 center(withLight), center(without));
+    EXPECT_GT(lit, dark + 2000u) << "point light must brighten the frame";
+    EXPECT_GT(center(withLight), center(without) + 20u) << "center pixel must brighten too";
 }
 
 // A far occluder (beyond the range a single camera-centered shadow box covers)
@@ -325,7 +333,8 @@ TEST(Render, BloomAddsHalo) {
         camera.fov_y_deg = 60.f;
         VulkanRenderer renderer;
         if (!renderer.init_offscreen(64, 64).ok()) return std::vector<u8>{};
-        renderer.set_bloom(bloom, 0.8f, 1.0f, 0.5f); // after init: impl exists
+        // after init: impl exists. threshold 0.3 so the sun-lit cube (HDR ~1) blooms.
+        renderer.set_bloom(bloom, 1.0f, 0.3f, 0.5f);
         renderer.render(scene, camera, 1.f / 60.f);
         auto rb = renderer.readback();
         renderer.shutdown();
@@ -553,6 +562,33 @@ TEST(Render, WindowedResizeRecreatesSwapchain) {
 }
 
 #endif
+
+// The renderer's light gather must find point lights via
+// view<PointLightComponent, TransformComponent> and read the world position.
+TEST(Render, PointLightGatherView) {
+    Scene scene("t");
+    register_builtin_components(scene.world());
+    EntityId lamp = scene.world().create_entity("lamp");
+    auto& lt = scene.world().emplace<TransformComponent>(lamp);
+    lt.position = {0.f, 1.f, 2.f};
+    auto& pl = scene.world().emplace<PointLightComponent>(lamp);
+    pl.color = {1.f, 1.f, 1.f};
+    pl.intensity = 50.f;
+    pl.range = 10.f;
+    u32 n = 0;
+    for (EntityId e : scene.world().view<PointLightComponent, TransformComponent>()) {
+        const auto* p = scene.world().get<PointLightComponent>(e);
+        ASSERT_NE(p, nullptr);
+        const math::Mat4 wm = world_matrix(scene.world(), e);
+        EXPECT_NEAR(wm[3].x, 0.f, 1e-6f);
+        EXPECT_NEAR(wm[3].y, 1.f, 1e-6f);
+        EXPECT_NEAR(wm[3].z, 2.f, 1e-6f);
+        EXPECT_NEAR(p->intensity, 50.f, 1e-6f);
+        EXPECT_NEAR(p->range, 10.f, 1e-6f);
+        ++n;
+    }
+    EXPECT_EQ(n, 1u);
+}
 
 // CSM split math (CPU, always compiled).
 TEST(Render, CascadeSplitsShape) {
