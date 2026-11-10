@@ -393,15 +393,19 @@ TEST(Render, SSRReflectsScene) {
         scene.world().emplace<MeshRendererComponent>(ground).model_path = "assets/cube.gltf";
         EntityId cube = scene.world().create_entity("cube");
         auto& ct = scene.world().emplace<TransformComponent>(cube);
-        ct.position = {0.f, 2.f, -2.f};
+        ct.position = {0.f, 0.5f, -2.f}; // sitting on the ground
         scene.world().emplace<MeshRendererComponent>(cube).model_path = "assets/cube.gltf";
         EntityId sun = scene.world().create_entity("sun");
         auto& dl = scene.world().emplace<DirectionalLightComponent>(sun);
         dl.direction = {0.f, -1.f, -0.5f};
         dl.intensity = 3.f;
         Camera camera;
-        camera.position = {0.f, 1.f, 4.f};
+        camera.position = {0.f, 2.f, 4.f};
         camera.fov_y_deg = 60.f;
+        // Pitch down so the cube's ground reflection is inside the frame.
+        const math::Mat4 lv = math::look_at(camera.position, math::Vec3(0.f, -1.f, -2.f),
+                                            math::Vec3(0.f, 1.f, 0.f));
+        camera.rotation = glm::quat_cast(glm::transpose(glm::mat3(lv)));
         VulkanRenderer renderer;
         if (!renderer.init_offscreen(64, 64).ok()) return std::vector<u8>{};
         renderer.set_ssr(ssr, 2.0f);

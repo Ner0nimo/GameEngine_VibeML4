@@ -704,11 +704,14 @@ struct VulkanRenderer::Impl {
                 cl->clearTextureFloat(texHDR[i], TextureSubresourceSet(), Color(0.f, 0.f, 0.f, 1.f));
         });
 
-        // SSR reflection output (reflected scene color * confidence * F0).
+        // SSR reflection output (rgb = reflected color, a = confidence).
         texSSR = createTex2D(w, h, Format::RGBA16_FLOAT, true, "ssr");
         FramebufferDesc fbssr;
         fbssr.addColorAttachment(texSSR);
         fbSSR = dev->createFramebuffer(fbssr);
+        runOneShot([&](ICommandList* cl) {
+            cl->clearTextureFloat(texSSR, TextureSubresourceSet(), Color(0.f, 0.f, 0.f, 1.f));
+        });
 
         // Bloom mip chain: level i is at (w >> (i+1)) — level 0 is the bright
         // pass at half res, deeper levels downsample further.
