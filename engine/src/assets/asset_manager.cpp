@@ -10,6 +10,48 @@
 #include <fstream>
 #include <sstream>
 
+#if defined(__linux__)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
+namespace ignis {
+namespace {
+
+// IGN-002 (TOCTOU mitigation): open the final path component with O_NOFOLLOW
+// so a symlink swapped in after the canonicalization check is rejected at the
+// filesystem boundary, not just at check time. Intermediate-directory races
+// remain (documented in path_util.h); this closes the leaf-swap window.
+Result<std::vector<u8>> read_file_no_follow(const std::filesystem::path& p) {
+#if defined(__linux__)
+    const int fd = ::open(p.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return Result<std::vector<u8>>::failure("cannot open '" + p.string() + "'");
+    std::vector<u8> data;
+    char buf[65536];
+    ssize_t n = 0;
+    while ((n = ::read(fd, buf, sizeof buf)) > 0)
+        data.insert(data.end(), buf, buf + n);
+    ::close(fd);
+    if (n < 0)
+        return Result<std::vector<u8>>::failure("read error on '" + p.string() + "'");
+    return Result<std::vector<u8>>::success(std::move(data));
+#else
+    std::error_code ec;
+    if (std::filesystem::is_symlink(p, ec))
+        return Result<std::vector<u8>>::failure("symlink leaf rejected: '" + p.string() + "'");
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return Result<std::vector<u8>>::failure("cannot open '" + p.string() + "'");
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    const std::string s = ss.str();
+    return Result<std::vector<u8>>::success(std::vector<u8>(s.begin(), s.end()));
+#endif
+}
+
+} // namespace
+} // namespace ignis
+
 namespace ignis {
 
 namespace fs = std::filesystem;
@@ -37,13 +79,7 @@ Result<std::vector<u8>> AssetManager::read_file(const std::string& path) {
         if (!is_path_within_root(project_root_, resolved))
             return Result<std::vector<u8>>::failure("asset path '" + path + "' escapes project root");
     }
-    std::ifstream f(resolved, std::ios::binary);
-    if (!f) return Result<std::vector<u8>>::failure("cannot open '" + path + "'");
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    const std::string s = ss.str();
-    return Result<std::vector<u8>>::success(
-        std::vector<u8>(s.begin(), s.end()));
+    return read_file_no_follow(resolved);
 }
 
 Result<std::string> AssetManager::read_text(const std::string& path) {

@@ -328,8 +328,9 @@ end
 }
 
 TEST(LuaIsolation, SharedGlobalsAreReadOnly) {
-    // One script must not be able to mutate the shared global table (_G) that
-    // every per-script environment inherits via __index.
+    // IGN-001: _G of each script is its OWN env (writes stay isolated), and
+    // the sandbox removes the mutation bypasses: rawset, setmetatable,
+    // getmetatable, load/dofile/loadfile.
     Scene scene("ro");
     register_builtin_components(scene.world());
     AssetManager assets;
@@ -337,16 +338,22 @@ TEST(LuaIsolation, SharedGlobalsAreReadOnly) {
     ASSERT_TRUE(scripts.init(&scene, &assets).ok());
     const std::string path_a = write_script("ignis_ro_a.lua", R"LUA(
 function on_create(self)
-    pcall(function() _G.pwned = 1 end) -- must fail: _G is read-only
-    own_global = 7 -- lands in this script's own env only
+    _G.pwned = 1 -- lands in THIS script's env only (not shared)
+    if rawset == nil and setmetatable == nil and getmetatable == nil
+       and load == nil and dofile == nil and loadfile == nil then
+        ignis.entity.create("ro_ok")
+    else
+        ignis.entity.create("ro_fail")
+    end
 end
 )LUA");
     const std::string path_b = write_script("ignis_ro_b.lua", R"LUA(
 function on_create(self)
-    if rawget(_G, "pwned") == nil and rawget(_G, "own_global") == nil and own_global == nil then
-        ignis.entity.create("ro_ok")
+    -- _G is B's own env: A's writes must be invisible here.
+    if rawget(_G, "pwned") == nil and pwned == nil then
+        ignis.entity.create("iso_ok")
     else
-        ignis.entity.create("ro_fail")
+        ignis.entity.create("iso_fail")
     end
 end
 )LUA");
@@ -357,6 +364,48 @@ end
     scripts.update(0.016f);
     EXPECT_TRUE(entity_named_exists(scene, "ro_ok"));
     EXPECT_FALSE(entity_named_exists(scene, "ro_fail"));
+    EXPECT_TRUE(entity_named_exists(scene, "iso_ok"));
+    EXPECT_FALSE(entity_named_exists(scene, "iso_fail"));
+    std::filesystem::remove(path_a);
+    std::filesystem::remove(path_b);
+}
+
+TEST(LuaIsolation, SharedLibTablesAreReadOnly) {
+    // Shared stdlib tables (string, table, math, utf8, ignis) must not be
+    // mutable from a script - otherwise one script breaks the others.
+    Scene scene("libro");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string path_a = write_script("ignis_libro_a.lua", R"LUA(
+function on_create(self)
+    local blocked = not pcall(function() string.rep = nil end)
+    if blocked and string.rep ~= nil and not pcall(function() ignis.entity = nil end) then
+        ignis.entity.create("libro_ok")
+    else
+        ignis.entity.create("libro_fail")
+    end
+end
+)LUA");
+    const std::string path_b = write_script("ignis_libro_b.lua", R"LUA(
+function on_create(self)
+    if string.rep("x", 3) == "xxx" and ignis.entity ~= nil then
+        ignis.entity.create("libro_b_ok")
+    else
+        ignis.entity.create("libro_b_fail")
+    end
+end
+)LUA");
+    EntityId a = scene.world().create_entity("a");
+    scene.world().emplace<ScriptComponent>(a).path = path_a;
+    EntityId b = scene.world().create_entity("b");
+    scene.world().emplace<ScriptComponent>(b).path = path_b;
+    scripts.update(0.016f);
+    EXPECT_TRUE(entity_named_exists(scene, "libro_ok"));
+    EXPECT_FALSE(entity_named_exists(scene, "libro_fail"));
+    EXPECT_TRUE(entity_named_exists(scene, "libro_b_ok"));
+    EXPECT_FALSE(entity_named_exists(scene, "libro_b_fail"));
     std::filesystem::remove(path_a);
     std::filesystem::remove(path_b);
 }

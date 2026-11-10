@@ -331,7 +331,12 @@ int l_asset_load_model(lua_State* L) {
     return 1;
 }
 
-void register_bindings(lua_State* L) {
+// File-local read-only guard used for all shared sandbox tables.
+int ro_newindex(lua_State* L) {
+    return luaL_error(L, "attempt to modify a read-only shared table");
+}
+
+void register_bindings(lua_State* L, int env_idx) {
     lua_newtable(L); // ignis
 
     lua_pushcfunction(L, l_log); lua_setfield(L, -2, "log");
@@ -364,7 +369,22 @@ void register_bindings(lua_State* L) {
     lua_pushcfunction(L, l_asset_load_model); lua_setfield(L, -2, "load_model");
     lua_setfield(L, -2, "assets");
 
-    lua_setglobal(L, "ignis");
+    // The real ignis table stays writable from C++ (audio/physics bindings add
+    // fields after init) and is exposed to scripts only through a read-only
+    // proxy stored in the sandbox env. Stack on entry: [.., ignis].
+    lua_pushvalue(L, -1);
+    lua_setglobal(L, "ignis"); // C++-side handle in the real globals (not script-visible)
+    lua_pushvalue(L, -1);
+    lua_setfield(L, LUA_REGISTRYINDEX, "ignis.bindings");
+    lua_newtable(L); // proxy
+    lua_newtable(L); // pmt
+    lua_pushvalue(L, -3); // real ignis table
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, &ro_newindex);
+    lua_setfield(L, -2, "__newindex");
+    lua_setmetatable(L, -2);          // proxy read-only -> [ignis, proxy]
+    lua_setfield(L, env_idx, "ignis"); // sandbox.ignis = proxy -> [ignis]
+    lua_pop(L, 1);
 }
 
 } // namespace
@@ -382,7 +402,7 @@ void ScriptEngine::instruction_hook(lua_State* L, lua_Debug* /*ar*/) {
 }
 
 int ScriptEngine::readonly_newindex(lua_State* L) {
-    return luaL_error(L, "attempt to modify the read-only shared global table");
+    return luaL_error(L, "attempt to modify a read-only shared table");
 }
 
 void* ScriptEngine::mem_alloc(void* ud, void* ptr, size_t osize, size_t nsize) {
@@ -431,21 +451,54 @@ Result<void> ScriptEngine::init(Scene* scene, AssetManager* assets) {
     assets_ = assets;
     L_ = lua_newstate(&ScriptEngine::mem_alloc, this); // custom allocator: memory budget
     if (!L_) return Result<void>::failure("lua_newstate failed");
-    // Sandbox: open only the safe standard libraries. io, os, package, debug,
-    // coroutine and dynamic loading (load/dofile/loadfile) are never exposed,
-    // so scripts only get the explicit ignis.* API plus safe base/string/
-    // table/math/utf8 functionality. Per-entity envs inherit this sandboxed
-    // _G via __index, not the host's.
-    luaL_requiref(L_, "_G", luaopen_base, 1); lua_pop(L_, 1);
-    luaL_requiref(L_, "string", luaopen_string, 1); lua_pop(L_, 1);
-    luaL_requiref(L_, "table", luaopen_table, 1); lua_pop(L_, 1);
-    luaL_requiref(L_, "math", luaopen_math, 1); lua_pop(L_, 1);
-    luaL_requiref(L_, "utf8", luaopen_utf8, 1); lua_pop(L_, 1);
-    for (const char* fn : {"load", "dofile", "loadfile"}) {
+    // --- Sandbox (IGN-001) ----------------------------------------------------
+    // Scripts never see the real globals table. Instead there is one shared,
+    // read-only sandbox environment holding the safe stdlib and ignis.*:
+    //  - io/os/package/debug/coroutine are never opened; load/dofile/loadfile,
+    //    rawset, setmetatable, getmetatable, print, collectgarbage are removed
+    //    from base (rawset would bypass __newindex, setmetatable could replace
+    //    a table's protection).
+    //  - the sandbox env, the base table and every lib table (string, table,
+    //    math, utf8, ignis) get a read-only metatable (__newindex errors), so
+    //    shared state cannot be mutated from any script.
+    //  - each per-script env gets __index = sandbox and _G = itself, so _G
+    //    writes stay inside the script's own environment.
+    lua_newtable(L_); // [sandbox]
+    luaL_requiref(L_, "base", luaopen_base, 0); // [sandbox, base]
+    for (const char* fn : {"rawset", "setmetatable", "getmetatable", "load", "dofile",
+                           "loadfile", "print", "collectgarbage", "gcinfo", "newproxy"}) {
         lua_pushnil(L_);
-        lua_setglobal(L_, fn);
+        lua_setfield(L_, -2, fn);
     }
-    register_bindings(L_);
+    lua_newtable(L_);                // [sandbox, base, mt]
+    lua_pushvalue(L_, -2);           // base
+    lua_setfield(L_, -2, "__index"); // mt.__index = base -> [sandbox, base, mt]
+    // Each lib gets a read-only PROXY: __newindex only fires for new keys, so a
+    // plain metatable on the lib table would still allow overwriting existing
+    // fields (string.rep = nil). A proxy {__index=lib, __newindex=error} blocks
+    // both new and existing key writes from scripts; the real lib stays intact.
+    const struct { const char* name; lua_CFunction openf; } libs[] = {
+        {"string", luaopen_string}, {"table", luaopen_table},
+        {"math", luaopen_math},     {"utf8", luaopen_utf8},
+    };
+    for (const auto& lib : libs) {
+        luaL_requiref(L_, lib.name, lib.openf, 0); // [sandbox, base, mt, lib]
+        lua_newtable(L_);                          // [.., lib, proxy]
+        lua_newtable(L_);                          // [.., lib, proxy, pmt]
+        lua_pushvalue(L_, -3);                     // lib
+        lua_setfield(L_, -2, "__index");           // pmt.__index = lib
+        lua_pushcfunction(L_, &ro_newindex);
+        lua_setfield(L_, -2, "__newindex");        // pmt.__newindex = error
+        lua_setmetatable(L_, -2);                  // proxy read-only -> [sandbox, base, mt, lib, proxy]
+        lua_setfield(L_, -5, lib.name);            // sandbox[name] = proxy -> [sandbox, base, mt, lib]
+        lua_pop(L_, 1);                            // drop real lib -> [sandbox, base, mt]
+    }
+    register_bindings(L_, 1); // creates the real ignis table, sets sandbox.ignis proxy, global "ignis" -> [sandbox, base, mt]
+    lua_pushcfunction(L_, &ro_newindex);
+    lua_setfield(L_, -2, "__newindex"); // mt.__newindex errors -> [sandbox, base, mt]
+    lua_setmetatable(L_, -3);           // sandbox metatable = mt -> [sandbox, base]
+    lua_pop(L_, 1);                     // [sandbox]
+    lua_setfield(L_, LUA_REGISTRYINDEX, "ignis.sandbox");
 
     lua_pushlightuserdata(L_, scene);
     lua_setfield(L_, LUA_REGISTRYINDEX, "ignis.scene");
@@ -453,14 +506,6 @@ Result<void> ScriptEngine::init(Scene* scene, AssetManager* assets) {
     lua_setfield(L_, LUA_REGISTRYINDEX, "ignis.assets");
     lua_pushlightuserdata(L_, this);
     lua_setfield(L_, LUA_REGISTRYINDEX, "ignis.engine");
-    // Make the shared globals table read-only for scripts: per-script envs
-    // inherit it via __index, so without this one script could mutate shared
-    // state through _G and affect every other script. Set after
-    // register_bindings because lua_setfield on globals would hit __newindex.
-    lua_newtable(L_);
-    lua_pushcfunction(L_, &ScriptEngine::readonly_newindex);
-    lua_setfield(L_, -2, "__newindex");
-    lua_setmetatable(L_, LUA_RIDX_GLOBALS); // Lua 5.4: globals live at this registry index
     lua_sethook(L_, &ScriptEngine::instruction_hook, LUA_MASKCOUNT, 1000);
     return Result<void>::success();
 }
@@ -500,12 +545,15 @@ Result<void> ScriptEngine::ensure_env(EntityId e) {
     if (!chunk_r.ok()) return Result<void>::failure(chunk_r.error());
     const int chunk_ref = chunk_r.value();
 
-    // env = setmetatable({entity = e}, {__index = _G})
+    // env = setmetatable({entity = e, _G = env}, {__index = sandbox})
+    // _G points at the script's OWN env, so even _G writes stay isolated.
     lua_newtable(L_);
     lua_pushinteger(L_, static_cast<lua_Integer>(e));
     lua_setfield(L_, -2, "entity");
+    lua_pushvalue(L_, -1);
+    lua_setfield(L_, -2, "_G");
     lua_newtable(L_);
-    lua_getglobal(L_, "_G");
+    lua_getfield(L_, LUA_REGISTRYINDEX, "ignis.sandbox");
     lua_setfield(L_, -2, "__index");
     lua_setmetatable(L_, -2);
 

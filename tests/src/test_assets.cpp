@@ -187,3 +187,20 @@ TEST(AssetsSecurity, EditorModeStillAllowsAbsolutePaths) {
     EXPECT_TRUE(am.read_file(path.string()).ok());
     std::filesystem::remove(path);
 }
+
+TEST(AssetsSecurity, SymlinkLeafRejectedAtOpenEvenInEditorMode) {
+    // IGN-002 (TOCTOU mitigation): the final path component is opened with
+    // O_NOFOLLOW on Linux, so a symlinked leaf is rejected at the filesystem
+    // boundary even in EditorFilesystem mode (no root check there).
+#if defined(__linux__)
+    AssetSandbox sb;
+    std::error_code ec;
+    fs::create_symlink(sb.tmp / "secret.txt", sb.proj / "innocent_link.txt", ec);
+    ASSERT_FALSE(ec) << ec.message();
+    AssetManager am; // EditorFilesystem default
+    EXPECT_FALSE(am.read_file((sb.proj / "innocent_link.txt").string()).ok())
+        << "symlink leaf must be rejected at open, not followed";
+    // A regular file still reads fine.
+    EXPECT_TRUE(am.read_file((sb.proj / "data.txt").string()).ok());
+#endif
+}
