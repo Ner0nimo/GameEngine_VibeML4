@@ -55,6 +55,13 @@ public:
     virtual RenderStats stats() const = 0;
 };
 
+// Practical (logarithmic/uniform mix) cascade split distances for a directional
+// light's shadow map. Returns count+1 monotonically increasing distances in
+// [z_near, z_far] with splits[0] == z_near and splits[count] == z_far.
+// Returns an empty vector for invalid input (z_near <= 0, z_far <= z_near,
+// count == 0).
+std::vector<f32> cascade_splits(f32 z_near, f32 z_far, u32 count, f32 lambda = 0.6f);
+
 // CPU-side helpers shared by editor picking and tests.
 namespace picking {
     struct Ray {

@@ -72,6 +72,10 @@ public:
     // plus the mipmapped prefiltered radiance cubemap (specular reflections).
     Result<void> set_environment_hdr(const std::string& path);
 
+    // CSM: how many shadow cascades to render (clamped to 1..4). 1 disables
+    // cascading and uses a single shadow map (fallback / perf toggle).
+    void set_shadow_cascade_count(u32 count);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

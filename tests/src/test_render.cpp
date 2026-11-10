@@ -9,6 +9,9 @@
 #include "ignis/renderer/renderer.h"
 #include "ignis/scene/scene.h"
 
+#include <algorithm>
+#include <cmath>
+
 #ifdef IGNIS_RENDERER_VULKAN
 #include "ignis/physics/physics_world.h"
 #include "ignis/renderer/vulkan_renderer.h"
@@ -256,6 +259,58 @@ TEST(Render, PointLightLightsCube) {
                                << " without=" << dark;
 }
 
+// A far occluder (beyond the range a single camera-centered shadow box covers)
+// must cast a shadow on the ground when 4 cascades are active; the 1-cascade
+// fallback must still render.
+TEST(Render, CSMShadowsFarGeometry) {
+    if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
+    auto render = [](u32 cascades) {
+        Scene scene("csm");
+        register_builtin_components(scene.world());
+        EntityId ground = scene.world().create_entity("ground");
+        auto& gt = scene.world().emplace<TransformComponent>(ground);
+        gt.position = {0.f, -2.f, -40.f};
+        gt.scale = {60.f, 1.f, 60.f};
+        scene.world().emplace<MeshRendererComponent>(ground).model_path = "assets/cube.gltf";
+        EntityId blocker = scene.world().create_entity("blocker");
+        auto& bt = scene.world().emplace<TransformComponent>(blocker);
+        bt.position = {0.f, 4.f, -45.f};
+        bt.scale = {2.f, 2.f, 2.f};
+        scene.world().emplace<MeshRendererComponent>(blocker).model_path = "assets/cube.gltf";
+        EntityId sun = scene.world().create_entity("sun");
+        auto& dl = scene.world().emplace<DirectionalLightComponent>(sun);
+        dl.direction = {0.f, -1.f, -0.5f};
+        dl.intensity = 3.f;
+        dl.cast_shadow = true;
+        Camera camera;
+        camera.position = {0.f, 0.f, 3.f};
+        camera.fov_y_deg = 60.f;
+        VulkanRenderer renderer;
+        renderer.set_shadow_cascade_count(cascades);
+        if (!renderer.init_offscreen(64, 64).ok()) return std::vector<u8>{};
+        renderer.render(scene, camera, 1.f / 60.f);
+        auto rb = renderer.readback();
+        renderer.shutdown();
+        return rb.ok() ? std::move(rb.value()) : std::vector<u8>{};
+    };
+    const std::vector<u8> px = render(4);
+    ASSERT_EQ(px.size(), 64u * 64u * 4u);
+    const std::vector<u8> px1 = render(1); // single-map fallback must still render
+    ASSERT_EQ(px1.size(), px.size());
+    auto lum = [](const std::vector<u8>& p, u32 x, u32 y) {
+        const size_t i = (static_cast<size_t>(y) * 64u + x) * 4u;
+        return static_cast<u32>(p[i]) + p[i + 1] + p[i + 2];
+    };
+    u32 shadowMin = ~0u, litMax = 0;
+    for (u32 y = 31; y <= 36; ++y)
+        for (u32 x = 28; x <= 36; ++x) shadowMin = std::min(shadowMin, lum(px, x, y));
+    for (u32 y = 39; y <= 44; ++y)
+        for (u32 x = 28; x <= 36; ++x) litMax = std::max(litMax, lum(px, x, y));
+    std::fprintf(stderr, "csm: shadowMin=%u litMax=%u\n", shadowMin, litMax);
+    EXPECT_GT(litMax, 100u); // ground is lit, not sky
+    EXPECT_LT(shadowMin, litMax - 15u) << "far occluder must cast a shadow with 4 cascades";
+}
+
 TEST(Render, DebugLinesDrawn) {
     if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
     Scene scene("lines");
@@ -343,6 +398,9 @@ TEST(Render, OffscreenCubeLit) {
 TEST(Render, PointLightLightsCube) {
     GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
 }
+TEST(Render, CSMShadowsFarGeometry) {
+    GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
+}
 TEST(Render, DebugLinesDrawn) {
     GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
 }
@@ -351,3 +409,27 @@ TEST(Render, TestSceneOffscreenRenders) {
 }
 
 #endif
+
+// CSM split math (CPU, always compiled).
+TEST(Render, CascadeSplitsShape) {
+    const auto s = cascade_splits(0.1f, 100.f, 4);
+    ASSERT_EQ(s.size(), 5u);
+    EXPECT_NEAR(s.front(), 0.1f, 1e-6f);
+    EXPECT_NEAR(s.back(), 100.f, 1e-4f);
+    for (u32 i = 1; i < s.size(); ++i) EXPECT_GT(s[i], s[i - 1]);
+    for (f32 v : s) {
+        EXPECT_GE(v, 0.1f);
+        EXPECT_LE(v, 100.f);
+    }
+    // Invalid input -> empty (documented contract).
+    EXPECT_TRUE(cascade_splits(0.f, 100.f, 4).empty());
+    EXPECT_TRUE(cascade_splits(10.f, 5.f, 4).empty());
+    EXPECT_TRUE(cascade_splits(0.1f, 100.f, 0).empty());
+    // lambda = 0 -> uniform splits; lambda = 1 -> pure logarithmic.
+    const auto uni = cascade_splits(1.f, 100.f, 3, 0.f);
+    ASSERT_EQ(uni.size(), 4u);
+    EXPECT_NEAR(uni[1], 1.f + 99.f / 3.f, 1e-3f);
+    const auto log = cascade_splits(1.f, 100.f, 3, 1.f);
+    ASSERT_EQ(log.size(), 4u);
+    EXPECT_NEAR(log[1], std::pow(100.f, 1.f / 3.f), 1e-3f);
+}

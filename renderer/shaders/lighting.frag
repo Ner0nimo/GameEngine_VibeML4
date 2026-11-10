@@ -32,16 +32,14 @@ layout(set = 1, binding = 256) uniform UniformBuffer {
     float lightIntensity;
     vec3 lightColor;
     float _pad1;
-    mat4 lightViewProj;
-    vec2 shadowMapInvSize;  // 1 / shadow map size
-    vec2 shadowDepthRange;  // x = znear, y = zfar - znear of the light ortho frustum
+    mat4 lightViewProj;    // cascade 0 matrix (legacy single-map path)
+    vec2 shadowMapInvSize; // 1 / slice size (both axes)
     float shadowBias;
     float ambientStrength;
     float envMipLevels;       // mip count of tex_prefilter
     float shadowSearchTexels; // PCSS blocker-search radius, in texels
     float shadowMaxPenumbra;  // PCSS max filter radius, in texels
     float shadowLightSize;    // world-space light size driving the penumbra width
-    float shadowBoxWidth;     // world width of the light ortho box (for texel size)
     float _pad2;
     vec4 clearColor;
     // Local lights (unshadowed), fixed-capacity vec4 arrays.
@@ -53,6 +51,11 @@ layout(set = 1, binding = 256) uniform UniformBuffer {
     vec4 spotInnerRange[4];  // x = cos(inner angle), y = range
     vec2 lightCounts;        // x = point count, y = spot count
     float _pad3, _pad4;
+    mat4 camView;            // camera view matrix (cascade selection)
+    mat4 cascadeViewProj[4]; // per-cascade light view-proj (atlas slices)
+    vec4 cascadeSplits;      // xyz = split distances 1..3, w = far (view space)
+    vec4 shadowCascade;      // x = active cascade count (1 = single-map fallback)
+    vec4 cascadeFrustum[4];  // per cascade: x = znear, y = zspan, z = box width
 } ubo;
 
 const float PI = 3.14159265359;
@@ -78,9 +81,6 @@ float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
     return (NdotV / (NdotV * (1.0 - k) + k + 1e-7)) * (NdotL / (NdotL * (1.0 - k) + k + 1e-7));
 }
 
-// Percentage-closer soft shadows: blocker search -> penumbra width from
-// similar triangles -> PCF kernel scaled to the penumbra. Contact points get
-// hard shadows, distant occluders get wide soft ones.
 // Cook-Torrance direct term (diffuse + specular) * NdotL for one light
 // direction L, without color/intensity/attenuation — callers multiply those.
 vec3 directTerm(vec3 N, vec3 V, vec3 L, vec3 albedo, float roughness, float metallic, vec3 F0) {
@@ -101,36 +101,43 @@ float rangeAttenuation(float dist, float range) {
     return x * x / (dist * dist + 1.0);
 }
 
-float shadowPCSS(vec4 worldPos, vec3 N, vec3 L) {
-    vec4 sc = ubo.lightViewProj * worldPos;
+// PCSS inside one cascade. uvLocal is the slice-local [0,1] shadow UV and c
+// the cascade index; blocker search and PCF run in the selected cascade's
+// coordinate system so softness doesn't pop at cascade switches.
+// The shadow map is a vertical atlas: slice c occupies v in [c/4, (c+1)/4].
+// Percentage-closer soft shadows: blocker search -> penumbra width from
+// similar triangles -> PCF kernel scaled to the penumbra.
+float pcssCascade(int c, vec4 worldPos, vec3 N, vec3 L) {
+    vec4 sc = ubo.cascadeViewProj[c] * worldPos;
     vec3 proj = sc.xyz / sc.w;
     if (proj.z > 1.0 || proj.z < 0.0 ||
         proj.x < -1.0 || proj.x > 1.0 || proj.y < -1.0 || proj.y > 1.0) return 1.0;
-    vec2 uv = proj.xy * 0.5 + 0.5;
+    vec2 uvLocal = proj.xy * 0.5 + 0.5;
     float bias = ubo.shadowBias * (1.0 - max(dot(N, L), 0.0)) + ubo.shadowBias * 0.5;
     float receiver = proj.z - bias;
+    vec4 fr = ubo.cascadeFrustum[c]; // x = znear, y = zspan, z = box width
+    float inv = ubo.shadowMapInvSize.x;
 
     // 1) Blocker search: average depth of occluders in a fixed neighborhood.
-    float searchUv = ubo.shadowSearchTexels * ubo.shadowMapInvSize.x;
+    float searchUv = ubo.shadowSearchTexels * inv;
     float blockerSum = 0.0;
     float blockers = 0.0;
     for (int x = -2; x <= 2; ++x)
         for (int y = -2; y <= 2; ++y) {
-            float d = texture(sampler2D(tex_shadow, samp_shadow),
-                              uv + vec2(float(x), float(y)) * searchUv).r;
+            vec2 luv = uvLocal + vec2(float(x), float(y)) * searchUv;
+            vec2 uv = vec2(luv.x, (float(c) + luv.y) / 4.0);
+            float d = texture(sampler2D(tex_shadow, samp_shadow), uv).r;
             if (d < receiver) { blockerSum += d; blockers += 1.0; }
         }
     if (blockers < 1.0) return 1.0; // no occluder nearby -> fully lit
     float avgBlocker = blockerSum / blockers;
 
-    // 2) Penumbra width in shadow-map texels. Ortho depth is linear in
-    // view distance, so ndc deltas convert with the frustum depth span.
-    float zn = ubo.shadowDepthRange.x;
-    float zspan = ubo.shadowDepthRange.y;
-    float blockerDist = avgBlocker * zspan + zn;
-    float worldDelta = (receiver - avgBlocker) * zspan;
+    // 2) Penumbra width in texels. Ortho depth is linear in view distance, so
+    // ndc deltas convert with this cascade's depth span.
+    float blockerDist = avgBlocker * fr.y + fr.x;
+    float worldDelta = (receiver - avgBlocker) * fr.y;
     float penumbraWorld = worldDelta * ubo.shadowLightSize / max(blockerDist, 1e-3);
-    float worldPerTexel = ubo.shadowBoxWidth * ubo.shadowMapInvSize.x;
+    float worldPerTexel = fr.z * inv;
     float radius = clamp(penumbraWorld / max(worldPerTexel, 1e-6), 1.0, ubo.shadowMaxPenumbra);
 
     // 3) PCF over a 7x7 kernel scaled to the penumbra radius.
@@ -138,11 +145,39 @@ float shadowPCSS(vec4 worldPos, vec3 N, vec3 L) {
     const int R = 3;
     for (int x = -R; x <= R; ++x)
         for (int y = -R; y <= R; ++y) {
-            vec2 suv = uv + vec2(float(x), float(y)) * ubo.shadowMapInvSize * (radius / float(R));
-            float d = texture(sampler2D(tex_shadow, samp_shadow), suv).r;
+            vec2 luv = uvLocal + vec2(float(x), float(y)) * inv * (radius / float(R));
+            vec2 uv = vec2(luv.x, (float(c) + luv.y) / 4.0);
+            float d = texture(sampler2D(tex_shadow, samp_shadow), uv).r;
             sum += (d >= receiver) ? 1.0 : 0.0;
         }
     return sum / float((2 * R + 1) * (2 * R + 1));
+}
+
+// View-space distance of cascade split i (i in 0..3); split 3 is the far plane.
+float cascadeSplitAt(int i) {
+    return i < 3 ? ubo.cascadeSplits[i] : ubo.cascadeSplits.w;
+}
+
+int selectCascade(float viewZ, int count) {
+    for (int i = 0; i < 4; ++i)
+        if (i >= count - 1 || viewZ <= cascadeSplitAt(i)) return i;
+    return count - 1;
+}
+
+// CSM shadow: pick the cascade by view depth, PCSS inside it, and blend with
+// the next cascade over the last 20% of the current one (all boundaries).
+float shadowCSM(vec4 worldPos, vec3 N, vec3 L) {
+    float viewZ = -vec4(ubo.camView * worldPos).z;
+    int count = max(int(ubo.shadowCascade.x + 0.5), 1);
+    int c = selectCascade(viewZ, count);
+    float s = pcssCascade(c, worldPos, N, L);
+    const float band = 0.2;
+    if (c + 1 < count) {
+        float split = cascadeSplitAt(c);
+        float w = clamp((viewZ - split * (1.0 - band)) / max(split * band, 1e-4), 0.0, 1.0);
+        if (w > 0.0) s = mix(s, pcssCascade(c + 1, worldPos, N, L), w);
+    }
+    return s;
 }
 
 void main() {
@@ -166,8 +201,8 @@ void main() {
 
     vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
 
-    // Directional light with PCSS soft shadow.
-    float shadow = shadowPCSS(vec4(worldPos, 1.0), N, L);
+    // Directional light with CSM + PCSS soft shadow.
+    float shadow = shadowCSM(vec4(worldPos, 1.0), N, L);
     vec3 direct = directTerm(N, V, L, albedo.rgb, roughness, metallic, F0)
                 * ubo.lightColor * ubo.lightIntensity * shadow;
 
