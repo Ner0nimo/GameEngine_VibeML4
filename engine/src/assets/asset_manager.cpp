@@ -91,6 +91,8 @@ Result<std::string> AssetManager::read_text(const std::string& path) {
 
 std::shared_ptr<Texture> decode_texture_memory(
     const std::string& name, const std::vector<u8>& bytes, bool force_hdr) {
+    constexpr size_t kMaxImageBytes = 256ull << 20; // reject before size_t -> int
+    if (bytes.size() > kMaxImageBytes) return nullptr;
     auto tex = std::make_shared<Texture>();
     tex->name = name;
     int w = 0, h = 0, comp = 0;

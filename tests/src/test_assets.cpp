@@ -204,3 +204,26 @@ TEST(AssetsSecurity, SymlinkLeafRejectedAtOpenEvenInEditorMode) {
     EXPECT_TRUE(am.read_file((sb.proj / "data.txt").string()).ok());
 #endif
 }
+
+TEST(AssetsSecurity, HugeDimensionImageRejectedBeforeAllocation) {
+    // Minimal PNG header claiming 100000x100000 — stb must reject it via the
+    // dimension cap instead of attempting a huge allocation.
+    std::vector<u8> png = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    const u32 ihdr_len = 13;
+    const u32 w = 100000, h = 100000;
+    auto be32 = [&](u32 v) { png.push_back(static_cast<u8>(v >> 24)); png.push_back(static_cast<u8>(v >> 16)); png.push_back(static_cast<u8>(v >> 8)); png.push_back(static_cast<u8>(v)); };
+    be32(ihdr_len);
+    const char ihdr[4] = {'I', 'H', 'D', 'R'};
+    png.insert(png.end(), ihdr, ihdr + 4);
+    be32(w); be32(h);
+    png.push_back(8); png.push_back(2); png.push_back(0); png.push_back(0); png.push_back(0);
+    be32(0); // crc (stb does not verify)
+    const auto path = std::filesystem::temp_directory_path() / "ignis_huge.png";
+    {
+        std::ofstream f(path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(png.data()), static_cast<std::streamsize>(png.size()));
+    }
+    AssetManager am;
+    EXPECT_EQ(am.load_texture(path.string()), nullptr);
+    std::filesystem::remove(path);
+}

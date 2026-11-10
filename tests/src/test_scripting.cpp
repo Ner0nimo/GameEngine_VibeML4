@@ -499,3 +499,29 @@ end
     std::filesystem::remove(path);
     fs::remove_all(tmp);
 }
+
+TEST(LuaIsolation, DeadEntityIdsRejectedByBindings) {
+    Scene scene("dead");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string bad_path = write_script("ignis_dead.lua", R"LUA(
+function on_create(self)
+    local ok_add = ignis.entity.add_component(999, "Transform", {position = {1, 2, 3}})
+    if ok_add == false then
+        ignis.entity.set_name(999, "ghost")          -- must be a safe no-op
+        ignis.entity.remove_component(999, "Transform") -- must be a safe no-op
+        ignis.entity.create("dead_rejected")
+    else
+        ignis.entity.create("dead_accepted")
+    end
+end
+)LUA");
+    EntityId e = scene.world().create_entity("s");
+    scene.world().emplace<ScriptComponent>(e).path = bad_path;
+    scripts.update(0.016f);
+    EXPECT_TRUE(entity_named_exists(scene, "dead_rejected"));
+    EXPECT_FALSE(entity_named_exists(scene, "dead_accepted"));
+    std::filesystem::remove(bad_path);
+}
