@@ -221,3 +221,45 @@ TEST(AgentSecurity, OversizedCommandsRejected) {
     EXPECT_TRUE(results[1].ok);
     std::filesystem::remove(path);
 }
+
+TEST(AgentSecurity, RunCommandsRecursionIsRejected) {
+    Scene scene("rec");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    CommandProcessor proc(scene, assets);
+    namespace fs = std::filesystem;
+
+    // Self-referencing batch: must fail with the guard, not recurse forever.
+    const fs::path tmp = fs::temp_directory_path() / "ignis_rec_cmds.jsonl";
+    {
+        std::ofstream f(tmp);
+        f << "{\"cmd\":\"create_entity\",\"name\":\"self_rec\"}\n";
+        f << "{\"cmd\":\"run_commands\",\"file\":\"" << tmp.string() << "\"}\n";
+    }
+    auto results = proc.execute_file(tmp.string());
+    ASSERT_FALSE(results.empty());
+    // The self-reference must be stopped by the guard after exactly one pass.
+    u32 selfRec = 0;
+    for (EntityId id : scene.world().all_entities())
+        if (scene.world().name_of(id) == "self_rec") ++selfRec;
+    EXPECT_EQ(selfRec, 1u) << "guard must stop the self-reference after one pass";
+    fs::remove(tmp);
+
+    // Deep chain f0 -> f1 -> ... : each file creates one entity then recurses.
+    // The depth guard (max 8) must stop the chain; exactly 8 entities exist.
+    const fs::path dir = fs::temp_directory_path() / "ignis_rec_chain";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    for (int i = 0; i < 12; ++i) {
+        std::ofstream f(dir / ("f" + std::to_string(i) + ".jsonl"));
+        f << "{\"cmd\":\"create_entity\",\"name\":\"chain" << i << "\"}\n";
+        f << "{\"cmd\":\"run_commands\",\"file\":\"" << (dir / ("f" + std::to_string(i + 1) + ".jsonl")).string()
+          << "\"}\n";
+    }
+    proc.execute_file((dir / "f0.jsonl").string()); // must return, not overflow the stack
+    u32 chained = 0;
+    for (EntityId id : scene.world().all_entities())
+        if (scene.world().name_of(id).rfind("chain", 0) == 0) ++chained;
+    EXPECT_EQ(chained, 8u) << "depth guard must cap nesting at 8";
+    fs::remove_all(dir);
+}

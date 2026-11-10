@@ -161,7 +161,15 @@ Result<void> EditorApp::init_scene_and_systems(const std::string& scene_path,
 
     // Agent commands (AI-controllable).
     commands_ = std::make_unique<CommandProcessor>(*scene_, *assets_);
+    // Scope the AI-agent command interface and Lua path bindings to the
+    // project root; when driven by --commands (untrusted input), host paths
+    // are disallowed entirely.
+    const std::string cwd = std::filesystem::current_path().string();
+    commands_->set_project_root(cwd);
+    scripts_->set_project_root(cwd);
     if (!commands_path.empty()) {
+        commands_->set_host_paths_allowed(false);
+        scripts_->set_host_paths_allowed(false);
         auto results = commands_->execute_file(commands_path);
         for (const auto& r : results) IGNIS_INFO("cmd: {} ({})", r.message, r.ok ? "ok" : "FAIL");
     }

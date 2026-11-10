@@ -173,6 +173,13 @@ int main(int argc, char** argv) {
         IGNIS_ERROR("script engine init failed: {}", r.error());
         return 1;
     }
+    // Lua path bindings (ignis.scene.save) follow the same policy as assets:
+    // packaged runtime -> no host paths; dev runtime -> project root only.
+    if (!args.pak_path.empty()) {
+        scripts.set_host_paths_allowed(false);
+    } else {
+        scripts.set_project_root(std::filesystem::current_path().string());
+    }
     AudioEngine audio;
     if (auto r = audio.init(args.headless); !r.ok()) { // null device when headless
         IGNIS_ERROR("audio init failed: {}", r.error());

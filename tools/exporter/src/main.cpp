@@ -92,6 +92,27 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Root containment applies to ALL input and output paths, not just
+    // --include entries: --scene, --runtime and --out must all resolve
+    // inside the export root (symlinks are rejected at the boundary).
+    auto contained = [&](const fs::path& p, const char* what) -> bool {
+        std::error_code ec2;
+        if (fs::is_symlink(p, ec2)) {
+            IGNIS_ERROR("export: {} '{}' is a symlink; refusing", what, p.string());
+            return false;
+        }
+        const fs::path canon = fs::weakly_canonical(p, ec2);
+        if (ec2 || !is_path_within_root(root, canon)) {
+            IGNIS_ERROR("export: {} '{}' is outside the export root '{}'", what, p.string(),
+                        root.string());
+            return false;
+        }
+        return true;
+    };
+    if (!contained(scene_path, "--scene")) return 1;
+    if (!runtime_path.empty() && !contained(runtime_path, "--runtime")) return 1;
+    if (!contained(out_dir, "--out")) return 1;
+
     PakWriter writer;
 
     // Scene goes in as "scene.json".
@@ -100,11 +121,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Includes: keep their path relative to the export root.
+    // Includes: keep their path relative to the export root. The scene file
+    // is already packaged as scene.json - skip it if an include covers it.
     for (const auto& inc : includes) {
         std::vector<std::pair<std::string, fs::path>> files;
         collect_files(inc, root, files);
         for (const auto& [rel, path] : files) {
+            if (rel == "scene.json") {
+                IGNIS_WARN("export: skipping 'scene.json' from include (already packaged from --scene)");
+                continue;
+            }
             if (auto r = writer.add_file_from_disk(rel, path.string()); !r.ok()) {
                 IGNIS_ERROR("{}", r.error());
                 return 1;

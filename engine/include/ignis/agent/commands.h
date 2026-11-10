@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -46,6 +47,13 @@ public:
 
 private:
     Result<std::string> scope_path(const std::string& path) const;
+
+    // run_commands recursion guard: execute_file may be re-entered via the
+    // run_commands command; cap the nesting depth and reject batches that are
+    // already on the active stack (self-referencing .jsonl files).
+    static constexpr u32 kMaxBatchDepth = 8;
+    u32 batch_depth_ = 0;
+    std::vector<std::string> active_batches_;
 
     Scene& scene_;
     AssetManager& assets_;

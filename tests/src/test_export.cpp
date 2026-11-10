@@ -95,3 +95,29 @@ TEST(ExportSecurity, MissingArgumentValueExitsWithUsageError) {
     const int rc = run(std::string(IGNIS_EXPORTER_EXE) + " --scene"); // trailing flag, no value
     EXPECT_EQ(rc, 2);
 }
+
+TEST(ExportSecurity, SceneRuntimeAndOutMustBeInsideRoot) {
+    if (std::string(IGNIS_EXPORTER_EXE).empty()) GTEST_SKIP() << "exporter not built";
+    ExportSandbox sb;
+    const std::string exe = IGNIS_EXPORTER_EXE;
+
+    // --scene outside the export root: rejected.
+    int rc = run(exe + " --scene " + q(sb.tmp / "secret.txt") + " --root " + q(sb.proj) + " --out " +
+                 q(sb.dist));
+    EXPECT_NE(rc, 0) << "scene outside root must be rejected";
+
+    // --out outside the export root: rejected.
+    rc = run(exe + " --scene " + q(sb.proj / "scene.json") + " --root " + q(sb.proj) + " --out " +
+             q(sb.tmp / "outside_dist"));
+    EXPECT_NE(rc, 0) << "out dir outside root must be rejected";
+
+    // Normal export where the scene is also covered by --include: the
+    // duplicate "scene.json" entry must be skipped, not abort the export.
+    rc = run(exe + " --scene " + q(sb.proj / "scene.json") + " --root " + q(sb.proj) + " --include " +
+             q(sb.proj) + " --out " + q(sb.dist));
+    ASSERT_EQ(rc, 0);
+    PakReader r;
+    ASSERT_TRUE(r.open((sb.dist / "game.ignispak").string()).ok());
+    EXPECT_TRUE(r.has("scene.json"));
+    EXPECT_TRUE(r.has("assets/a.txt"));
+}

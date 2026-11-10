@@ -7,6 +7,7 @@
 #include "ignis/ecs/components.h"
 #include "ignis/scene/scene.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -165,31 +166,52 @@ CommandResult CommandProcessor::execute(const nlohmann::json& cmd) {
 
 std::vector<CommandResult> CommandProcessor::execute_file(const std::string& jsonl_path) {
     std::vector<CommandResult> results;
+    // Recursion guard (run_commands -> execute_file -> execute -> ...):
+    // cap nesting depth and reject batches already on the active stack.
+    if (batch_depth_ >= kMaxBatchDepth) {
+        results.push_back(fail("run_commands nesting too deep (max " +
+                               std::to_string(kMaxBatchDepth) + ")"));
+        return results;
+    }
+    std::error_code ec;
+    const std::string canon = fs::weakly_canonical(jsonl_path, ec).string();
+    const bool tracked = !ec;
+    if (tracked &&
+        std::find(active_batches_.begin(), active_batches_.end(), canon) != active_batches_.end()) {
+        results.push_back(fail("run_commands batch '" + jsonl_path + "' is already active (recursion)"));
+        return results;
+    }
+    ++batch_depth_;
+    if (tracked) active_batches_.push_back(canon);
+
     std::ifstream f(jsonl_path);
     if (!f) {
         results.push_back(fail("cannot open '" + jsonl_path + "'"));
-        return results;
+    } else {
+        std::string line;
+        u32 line_no = 0;
+        while (std::getline(f, line)) {
+            ++line_no;
+            if (line.empty()) continue;
+            if (results.size() >= max_batch_commands) {
+                results.push_back(fail("batch command limit exceeded (" +
+                                       std::to_string(max_batch_commands) + ")"));
+                break;
+            }
+            if (line.size() > max_command_bytes) {
+                results.push_back(fail("line " + std::to_string(line_no) + ": command too large"));
+                continue;
+            }
+            try {
+                results.push_back(execute(nlohmann::json::parse(line)));
+            } catch (const std::exception& e) {
+                results.push_back(fail(std::format("line {}: {}", line_no, e.what())));
+            }
+        }
     }
-    std::string line;
-    u32 line_no = 0;
-    while (std::getline(f, line)) {
-        ++line_no;
-        if (line.empty()) continue;
-        if (results.size() >= max_batch_commands) {
-            results.push_back(fail("batch command limit exceeded (" +
-                                   std::to_string(max_batch_commands) + ")"));
-            break;
-        }
-        if (line.size() > max_command_bytes) {
-            results.push_back(fail("line " + std::to_string(line_no) + ": command too large"));
-            continue;
-        }
-        try {
-            results.push_back(execute(nlohmann::json::parse(line)));
-        } catch (const std::exception& e) {
-            results.push_back(fail(std::format("line {}: {}", line_no, e.what())));
-        }
-    }
+
+    if (tracked) active_batches_.pop_back();
+    --batch_depth_;
     return results;
 }
 

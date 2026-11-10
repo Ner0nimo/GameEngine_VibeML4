@@ -8,6 +8,10 @@
 
 #include "lua_all.h"
 
+#include "ignis/core/path_util.h"
+
+#include <cstdlib>
+#include <filesystem>
 #include <unordered_set>
 #include <vector>
 
@@ -303,8 +307,19 @@ int l_scene_prefabs(lua_State* L) {
 }
 
 int l_scene_save(lua_State* L) {
+    auto* eng = get_engine(L);
     const char* path = luaL_checkstring(L, 1);
-    lua_pushboolean(L, get_scene(L)->save_to_file(path ? path : "").ok() ? 1 : 0);
+    const std::string p = path ? path : "";
+    // Path authorization: same policy as agent commands / asset access mode.
+    // Exported runtime (PackageOnly / host paths disallowed) can never write
+    // to the host filesystem from a packaged script.
+    std::string resolved = p;
+    if (eng && !eng->save_path_allowed(p, resolved)) {
+        IGNIS_WARN("ignis.scene.save denied for path '{}' (path policy)", p);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    lua_pushboolean(L, get_scene(L)->save_to_file(resolved).ok() ? 1 : 0);
     return 1;
 }
 
@@ -366,11 +381,56 @@ void ScriptEngine::instruction_hook(lua_State* L, lua_Debug* /*ar*/) {
         luaL_error(L, "script instruction budget exceeded");
 }
 
+int ScriptEngine::readonly_newindex(lua_State* L) {
+    return luaL_error(L, "attempt to modify the read-only shared global table");
+}
+
+void* ScriptEngine::mem_alloc(void* ud, void* ptr, size_t osize, size_t nsize) {
+    auto* eng = static_cast<ScriptEngine*>(ud);
+    if (nsize == 0) { // free
+        if (ptr) {
+            eng->mem_used_ -= osize;
+            std::free(ptr);
+        }
+        return nullptr;
+    }
+    const size_t old = ptr ? osize : 0;
+    // Hard cap: fail the allocation -> Lua raises a controlled
+    // "not enough memory" error instead of exhausting process memory.
+    if (nsize > eng->mem_cap_ || eng->mem_used_ - old + nsize > eng->mem_cap_)
+        return nullptr;
+    void* p = std::realloc(ptr, nsize);
+    if (!p) return nullptr;
+    eng->mem_used_ += nsize - old;
+    return p;
+}
+
+bool ScriptEngine::save_path_allowed(const std::string& path, std::string& resolved) const {
+    // Defense in depth: the asset access mode of a packaged runtime is
+    // PackageOnly - that always denies host writes, whatever the flags say.
+    if (assets_ && assets_->access_mode() == AssetAccessMode::PackageOnly)
+        return false;
+    if (!host_paths_allowed_)
+        return false;
+    if (project_root_.empty()) {
+        resolved = path;
+        return true;
+    }
+    if (is_unsafe_resource_path(path))
+        return false;
+    namespace fs = std::filesystem;
+    const fs::path full = fs::path(project_root_) / path;
+    if (!is_path_within_root(project_root_, full))
+        return false;
+    resolved = full.string();
+    return true;
+}
+
 Result<void> ScriptEngine::init(Scene* scene, AssetManager* assets) {
     scene_ = scene;
     assets_ = assets;
-    L_ = luaL_newstate();
-    if (!L_) return Result<void>::failure("luaL_newstate failed");
+    L_ = lua_newstate(&ScriptEngine::mem_alloc, this); // custom allocator: memory budget
+    if (!L_) return Result<void>::failure("lua_newstate failed");
     // Sandbox: open only the safe standard libraries. io, os, package, debug,
     // coroutine and dynamic loading (load/dofile/loadfile) are never exposed,
     // so scripts only get the explicit ignis.* API plus safe base/string/
@@ -393,6 +453,14 @@ Result<void> ScriptEngine::init(Scene* scene, AssetManager* assets) {
     lua_setfield(L_, LUA_REGISTRYINDEX, "ignis.assets");
     lua_pushlightuserdata(L_, this);
     lua_setfield(L_, LUA_REGISTRYINDEX, "ignis.engine");
+    // Make the shared globals table read-only for scripts: per-script envs
+    // inherit it via __index, so without this one script could mutate shared
+    // state through _G and affect every other script. Set after
+    // register_bindings because lua_setfield on globals would hit __newindex.
+    lua_newtable(L_);
+    lua_pushcfunction(L_, &ScriptEngine::readonly_newindex);
+    lua_setfield(L_, -2, "__newindex");
+    lua_setmetatable(L_, LUA_RIDX_GLOBALS); // Lua 5.4: globals live at this registry index
     lua_sethook(L_, &ScriptEngine::instruction_hook, LUA_MASKCOUNT, 1000);
     return Result<void>::success();
 }
