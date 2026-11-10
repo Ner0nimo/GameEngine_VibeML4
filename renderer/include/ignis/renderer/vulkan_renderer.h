@@ -54,6 +54,15 @@ public:
     void render(Scene& scene, const Camera& camera, f32 dt) override;
     void present();
     RawVulkanHandles raw_handles() const;
+    // True if the last render() actually produced a frame (windowed: acquire
+    // succeeded). When false (e.g. swapchain out of date), callers must skip
+    // presenting - presenting a stale image causes visible flicker.
+    bool frame_rendered() const { return frame_rendered_; }
+    // Windowed resize: only records a pending resize (safe from window event
+    // callbacks). The next render() waits for the GPU and recreates the
+    // swapchain + dependent targets. A 0x0 size means "minimized" - rendering
+    // is suspended until a real size arrives.
+    void request_resize(u32 framebuffer_width, u32 framebuffer_height);
     void set_debug_lines(const std::vector<DebugLine>& lines) override;
     RenderStats stats() const override { return stats_; }
 
@@ -83,6 +92,10 @@ private:
     std::vector<DebugLine> debug_lines_;
     AssetManager* assets_ = nullptr;
     u32 last_swap_index_ = 0;
+    bool resize_pending_ = false;
+    u32 pending_width_ = 0;
+    u32 pending_height_ = 0;
+    bool frame_rendered_ = false;
 };
 
 } // namespace ignis

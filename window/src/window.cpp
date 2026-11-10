@@ -38,6 +38,8 @@ Result<void> Window::init() {
     glfwSetMouseButtonCallback(window_, mouse_button_trampoline);
     glfwSetScrollCallback(window_, scroll_trampoline);
     glfwSetFramebufferSizeCallback(window_, resize_trampoline);
+    glfwSetWindowSizeCallback(window_, window_size_trampoline);
+    glfwSetWindowContentScaleCallback(window_, content_scale_trampoline);
 
     time_ = glfwGetTime();
     last_time_ = time_;
@@ -77,6 +79,21 @@ FramebufferSize Window::framebuffer_size() const {
     return out;
 }
 
+WindowSize Window::window_size() const {
+    WindowSize out;
+    int w = 0, h = 0;
+    if (window_) glfwGetWindowSize(window_, &w, &h);
+    out.width = static_cast<u32>(w);
+    out.height = static_cast<u32>(h);
+    return out;
+}
+
+ContentScale Window::content_scale() const {
+    ContentScale out;
+    if (window_) glfwGetWindowContentScale(window_, &out.x, &out.y);
+    return out;
+}
+
 #if defined(IGNIS_WINDOW_VULKAN)
 Result<void*> Window::create_vulkan_surface(void* instance) {
     VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -112,12 +129,24 @@ void Window::scroll_trampoline(GLFWwindow* w, double x, double y) {
 }
 
 void Window::resize_trampoline(GLFWwindow* win, int width, int height) {
+    // Framebuffer size in pixels - this is what the renderer cares about.
+    auto* self = static_cast<Window*>(glfwGetWindowUserPointer(win));
+    if (self && self->on_resize)
+        self->on_resize(static_cast<u32>(width), static_cast<u32>(height));
+}
+
+void Window::window_size_trampoline(GLFWwindow* win, int width, int height) {
+    // Logical window size in screen coordinates.
     auto* self = static_cast<Window*>(glfwGetWindowUserPointer(win));
     if (self) {
         self->props_.width = static_cast<u32>(width);
         self->props_.height = static_cast<u32>(height);
-        if (self->on_resize) self->on_resize(static_cast<u32>(width), static_cast<u32>(height));
     }
+}
+
+void Window::content_scale_trampoline(GLFWwindow* win, float x, float y) {
+    auto* self = static_cast<Window*>(glfwGetWindowUserPointer(win));
+    if (self && self->on_content_scale_changed) self->on_content_scale_changed(x, y);
 }
 
 } // namespace ignis

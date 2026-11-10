@@ -43,6 +43,7 @@ Result<void> VulkanRenderer::init(Window*) {
 }
 void VulkanRenderer::shutdown() {}
 void VulkanRenderer::on_resize(u32, u32) {}
+void VulkanRenderer::request_resize(u32, u32) {}
 void VulkanRenderer::render(Scene&, const Camera&, f32) {}
 void VulkanRenderer::present() {}
 RawVulkanHandles VulkanRenderer::raw_handles() const { return {}; }
@@ -367,6 +368,12 @@ Result<void> create_swapchain(VkPhysicalDevice phys, VkDevice device, VkSurfaceK
     return Result<void>::success();
 }
 
+// nvrhi::vulkan::convertFormat only maps nvrhi->Vk; do the reverse manually.
+Format swapFormatToNvrhi(VkFormat fmt) {
+    if (fmt == VK_FORMAT_B8G8R8A8_UNORM || fmt == VK_FORMAT_B8G8R8A8_SRGB) return Format::BGRA8_UNORM;
+    return Format::RGBA8_UNORM;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -421,6 +428,45 @@ struct VulkanRenderer::Impl {
     FramebufferHandle fbTonemap;
     std::vector<TextureHandle> swapTexWrapped;
     std::vector<FramebufferHandle> fbSwap;
+    Format psoFormat = Format::UNKNOWN; // format the pipelines were created with
+
+    // Swapchain-dependent resource lifecycle (windowed resize, issue #53).
+    void destroySwapchainResources() {
+        fbSwap.clear();
+        swapTexWrapped.clear();
+        if (swapchain != VK_NULL_HANDLE) {
+            vkDestroySwapchainKHR(device, swapchain, nullptr);
+            swapchain = VK_NULL_HANDLE;
+        }
+        swapImages.clear();
+    }
+
+    Result<void> wrapSwapchainImages() {
+        // nvrhi::vulkan::convertFormat only maps nvrhi->Vk; do the reverse manually.
+        Format nfmt = Format::RGBA8_UNORM;
+        if (swapFormat == VK_FORMAT_B8G8R8A8_UNORM || swapFormat == VK_FORMAT_B8G8R8A8_SRGB) {
+            nfmt = Format::BGRA8_UNORM;
+        } else if (swapFormat == VK_FORMAT_R8G8B8A8_UNORM || swapFormat == VK_FORMAT_R8G8B8A8_SRGB) {
+            nfmt = Format::RGBA8_UNORM;
+        }
+        for (VkImage img : swapImages) {
+            TextureDesc td;
+            td.width = swapExtent.width;
+            td.height = swapExtent.height;
+            td.format = nfmt;
+            td.dimension = TextureDimension::Texture2D;
+            td.isRenderTarget = true;
+            td.isShaderResource = false;
+            td.initialState = ResourceStates::Present;
+            td.keepInitialState = true;
+            auto tex = dev->createHandleForNativeTexture(ObjectTypes::VK_Image, img, td);
+            swapTexWrapped.push_back(tex);
+            FramebufferDesc fb;
+            fb.addColorAttachment(tex);
+            fbSwap.push_back(dev->createFramebuffer(fb));
+        }
+        return Result<void>::success();
+    }
 
     TextureHandle texWhite, texBlack, texNormalDefault, texIrradianceCube;
     TextureHandle texPrefilterCube, texBrdfLUT;
@@ -1025,31 +1071,11 @@ Result<void> VulkanRenderer::init(Window* window) {
 
     // Wrap swapchain images.
     if (window) {
-        // nvrhi::vulkan::convertFormat only maps nvrhi->Vk; do the reverse manually.
-        Format nfmt = Format::RGBA8_UNORM;
-        if (I.swapFormat == VK_FORMAT_B8G8R8A8_UNORM || I.swapFormat == VK_FORMAT_B8G8R8A8_SRGB) {
-            nfmt = Format::BGRA8_UNORM;
-        } else if (I.swapFormat == VK_FORMAT_R8G8B8A8_UNORM || I.swapFormat == VK_FORMAT_R8G8B8A8_SRGB) {
-            nfmt = Format::RGBA8_UNORM;
-        }
-        for (VkImage img : I.swapImages) {
-            TextureDesc td;
-            td.width = I.swapExtent.width;
-            td.height = I.swapExtent.height;
-            td.format = nfmt;
-            td.dimension = TextureDimension::Texture2D;
-            td.isRenderTarget = true;
-            td.isShaderResource = false;
-            td.initialState = ResourceStates::Present;
-            td.keepInitialState = true;
-            auto tex = I.dev->createHandleForNativeTexture(ObjectTypes::VK_Image, img, td);
-            I.swapTexWrapped.push_back(tex);
-            FramebufferDesc fb;
-            fb.addColorAttachment(tex);
-            I.fbSwap.push_back(I.dev->createFramebuffer(fb));
-        }
-        I.createPipelines(nfmt);
+        if (auto r = I.wrapSwapchainImages(); !r.ok()) return r;
+        I.psoFormat = swapFormatToNvrhi(I.swapFormat);
+        I.createPipelines(I.psoFormat);
     } else {
+        I.psoFormat = Format::RGBA8_UNORM;
         I.createPipelines(Format::RGBA8_UNORM);
     }
     I.createCommonResources();
@@ -1106,12 +1132,25 @@ void VulkanRenderer::shutdown() {
 }
 
 void VulkanRenderer::on_resize(u32 w, u32 h) {
-    // v1: recreate offscreen targets; windowed swapchain recreation on next init.
-    if (impl_ && impl_->offscreen && impl_->dev) {
-        impl_->dev->waitForIdle();
-        impl_->createTargets(w, h);
-        impl_->updateLightingSets();
+    if (!impl_) return;
+    if (impl_->offscreen) {
+        // Offscreen: recreate targets immediately (test/headless path).
+        if (impl_->dev) {
+            impl_->dev->waitForIdle();
+            impl_->createTargets(w, h);
+            impl_->updateLightingSets();
+        }
+    } else {
+        // Windowed: only record the pending resize; render() recreates the
+        // swapchain after waitForIdle (issue #53).
+        request_resize(w, h);
     }
+}
+
+void VulkanRenderer::request_resize(u32 framebuffer_width, u32 framebuffer_height) {
+    resize_pending_ = true;
+    pending_width_ = framebuffer_width;
+    pending_height_ = framebuffer_height;
 }
 
 Result<void> VulkanRenderer::set_environment_hdr(const std::string& path) {
@@ -1220,6 +1259,7 @@ void VulkanRenderer::set_shadow_cascade_count(u32 count) {
 
 void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
     (void)dt;
+    frame_rendered_ = false;
     if (!impl_ || !impl_->dev) return;
     auto& I = *impl_;
 
@@ -1263,6 +1303,42 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         cascades[c] = compute_cascade(camWorld, aspect, fovY, lightDir, splits[c], splits[c + 1]);
     const math::Mat4 lightViewProj = cascades[0].viewProj; // legacy single-map path
 
+    // Process a pending windowed resize here in the main loop (never inside the
+    // window event callback): wait for the GPU, then recreate the swapchain and
+    // all swapchain-dependent resources (issue #53).
+    if (!I.offscreen && I.swapchain != VK_NULL_HANDLE && resize_pending_) {
+        const u32 rw = pending_width_;
+        const u32 rh = pending_height_;
+        resize_pending_ = false;
+        if (rw == 0 || rh == 0) return; // minimized: suspend rendering this frame
+        // No-op guard: if the requested size already matches the swapchain, there
+        // is nothing to do. Without this, a persistently SUBOPTIMAL swapchain
+        // (acquire/present report it every frame) would recreate the swapchain
+        // every frame -> visible flicker.
+        if (rw != I.swapExtent.width || rh != I.swapExtent.height) {
+            I.dev->waitForIdle();
+            I.destroySwapchainResources();
+            if (auto r = create_swapchain(I.physical, I.device, I.surface, I.window, I.swapchain,
+                                          I.swapFormat, I.swapExtent, I.swapImages);
+                !r.ok()) {
+                IGNIS_ERROR("swapchain recreation failed: {}", r.error());
+                resize_pending_ = true; // retry next frame
+                pending_width_ = rw;
+                pending_height_ = rh;
+                return;
+            }
+            I.wrapSwapchainImages();
+            I.createTargets(I.swapExtent.width, I.swapExtent.height);
+            const Format nfmt = swapFormatToNvrhi(I.swapFormat);
+            if (nfmt != I.psoFormat) { // surface format changed: pipelines too
+                I.psoFormat = nfmt;
+                I.createPipelines(nfmt);
+            }
+            I.updateLightingSets();
+            IGNIS_INFO("swapchain recreated: {}x{}", I.swapExtent.width, I.swapExtent.height);
+        }
+    }
+
     // Acquire swapchain image (windowed) before recording. We wait on a fence
     // here and present after waitForIdle below, so no semaphores are needed:
     // NVRHI's executeCommandLists() already submits the command buffer itself,
@@ -1271,12 +1347,33 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
     if (!I.offscreen && I.swapchain) {
         VkResult acq = vkAcquireNextImageKHR(I.device, I.swapchain, UINT64_MAX, VK_NULL_HANDLE,
                                              I.inFlight, &swapIndex);
+        if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
+            // Swapchain no longer matches the surface: schedule recreation and
+            // skip this frame entirely (no present of a stale image).
+            if (I.window) {
+                const FramebufferSize fb = I.window->framebuffer_size();
+                request_resize(fb.width, fb.height);
+            }
+            return;
+        }
         if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
             IGNIS_WARN("vkAcquireNextImageKHR failed: {}", static_cast<int>(acq));
             return;
         }
+        // SUBOPTIMAL still presents fine; only schedule recreation if the
+        // framebuffer size actually differs from the swapchain extent (a
+        // persistently suboptimal-but-matching swapchain must NOT trigger a
+        // per-frame recreate loop -> flicker).
+        if (acq == VK_SUBOPTIMAL_KHR && I.window) {
+            const FramebufferSize fb = I.window->framebuffer_size();
+            if (fb.width != I.swapExtent.width || fb.height != I.swapExtent.height)
+                request_resize(fb.width, fb.height);
+        }
         vkWaitForFences(I.device, 1, &I.inFlight, VK_TRUE, UINT64_MAX);
         vkResetFences(I.device, 1, &I.inFlight);
+        frame_rendered_ = true;
+    } else {
+        frame_rendered_ = true; // offscreen always "renders"
     }
 
     auto cl = I.dev->createCommandList();
@@ -1596,7 +1693,19 @@ void VulkanRenderer::present() {
     pi.swapchainCount = 1;
     pi.pSwapchains = &I.swapchain;
     pi.pImageIndices = &last_swap_index_;
-    vkQueuePresentKHR(I.queue, &pi);
+    const VkResult pr = vkQueuePresentKHR(I.queue, &pi);
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR ||
+        (pr == VK_SUBOPTIMAL_KHR && I.window &&
+         [&] {
+             const FramebufferSize fb = I.window->framebuffer_size();
+             return fb.width != I.swapExtent.width || fb.height != I.swapExtent.height;
+         }())) {
+        // Never keep presenting on an outdated swapchain: schedule recreation.
+        if (I.window) {
+            const FramebufferSize fb = I.window->framebuffer_size();
+            request_resize(fb.width, fb.height);
+        }
+    }
 #else
     (void)0;
 #endif

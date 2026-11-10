@@ -23,6 +23,7 @@
 
 #ifdef IGNIS_WITH_GRAPHICS
 #include <vulkan/vulkan.h>
+#include <imgui.h>
 #endif
 
 namespace ignis {
@@ -72,8 +73,13 @@ private:
         std::vector<VkImageView> views;
         std::vector<VkFramebuffer> fbs;
         u32 image_count = 0;
+        u32 fb_width = 0;   // swapchain extent the views/fbs were built for
+        u32 fb_height = 0;
+        VkFormat format = VK_FORMAT_UNDEFINED;
     };
     UiHandles ui_;
+    ImGuiStyle base_style_{};  // pristine style captured after StyleColorsDark
+    f32 content_scale_ = 1.f;  // last applied DPI content scale
 
     // --- editor UI state ------------------------------------------------------
     std::string scene_path_; // file the current scene is loaded from / saves to
@@ -117,6 +123,17 @@ private:
     Result<void> init_imgui_ui();
     void main_loop(); // one frame = input, simulate, UI, render
     void shutdown_ui();
+
+    // Swapchain-dependent UI resources (issue #53): rebuilt whenever the
+    // renderer recreates the swapchain. The ImGui context/GLFW backend and
+    // descriptor/command pools survive; views/framebuffers/render pass and
+    // the ImGui Vulkan backend registration do not.
+    Result<void> create_ui_swapchain_resources();
+    void destroy_ui_swapchain_resources();
+    void rebuild_ui_after_swapchain_change();
+    void apply_content_scale(f32 scale);
+    void load_window_settings();
+    void save_window_settings() const;
 
     // One frame of UI, one function per panel (one level of abstraction).
     EntityId find_active_camera() const;

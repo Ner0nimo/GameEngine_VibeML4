@@ -248,6 +248,7 @@ int main(int argc, char** argv) {
         IGNIS_ERROR("window init failed: {}", r.error());
         return 1;
     }
+
     {
         // Probe the Vulkan stack in a forked child first: on some driver stacks
         // the driver itself crashes when NVRHI calls into it, and the runtime
@@ -275,6 +276,9 @@ int main(int argc, char** argv) {
         IGNIS_ERROR("renderer init failed: {}", r.error());
         return 1;
     }
+    // Framebuffer resize -> renderer records a pending resize; the next
+    // render() recreates the swapchain after waitForIdle (issue #53).
+    window.on_resize = [&renderer](u32 w, u32 h) { renderer.request_resize(w, h); };
     // Find active camera entity.
     Camera camera;
     while (!window.should_close()) {
