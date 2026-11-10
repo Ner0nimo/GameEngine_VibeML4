@@ -182,8 +182,8 @@ float shadowCSM(vec4 worldPos, vec3 N, vec3 L) {
 
 void main() {
     vec4 albedo = texture(sampler2D(tex_albedo, samp_albedo), v_uv);
-    if (albedo.a < 0.01) { // sky: DEBUG encode light UBO data
-        rt_hdr = vec4(ubo.lightCounts.x, ubo.pointColorInt[0].w / 200.0, ubo.pointPosRange[0].z, 1.0);
+    if (albedo.a < 0.01) { // sky: output clear color
+        rt_hdr = vec4(ubo.clearColor.rgb, 1.0);
         return;
     }
     vec3 worldPos = texture(sampler2D(tex_worldPos, samp_worldPos), v_uv).xyz;
@@ -244,6 +244,6 @@ void main() {
     vec3 ambientSpec = prefiltered * (Famb * brdf.x + brdf.y);
     vec3 ambient = (ambientDiffuse + ambientSpec) * ao * ssao * ubo.ambientStrength;
 
-    vec3 color = direct; // DEBUG: isolate the direct-light term
+    vec3 color = ambient + direct + emissive;
     rt_hdr = vec4(color, 1.0);
 }
