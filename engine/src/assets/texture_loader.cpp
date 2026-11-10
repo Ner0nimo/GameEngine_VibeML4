@@ -16,6 +16,12 @@ std::shared_ptr<Texture> AssetManager::load_texture_impl(const std::string& path
         return nullptr;
     }
     const std::vector<u8>& bytes = bytes_r.value();
+    // Reject oversized inputs before the size_t -> int conversion to stb.
+    constexpr size_t kMaxImageBytes = 256ull << 20;
+    if (bytes.size() > kMaxImageBytes) {
+        IGNIS_ERROR("load_texture: input too large ({} bytes) '{}'", bytes.size(), path);
+        return nullptr;
+    }
 
     auto tex = std::make_shared<Texture>();
     tex->name = path;

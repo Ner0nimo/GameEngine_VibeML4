@@ -67,3 +67,21 @@ We're building a production-grade, simple and straight-forward 3D Game Engine fo
 - Scripting with Lua (or other chosen language)
 - Control entities/components and run in update loop, and entity destruction/creation
 - Spawn new entities/prefabs
+
+## Security trust model
+Agent commands (`ignis/agent/commands.h`, `--commands file.jsonl`) and Lua
+scripts are treated as **untrusted input** even when supplied locally; the
+engine enforces capability boundaries rather than trusting the caller:
+
+- **Actor classes**: local trusted editor owner (full access), AI-generated
+  commands (validated, path-scoped, size/batch-limited), commands from
+  imported projects or external integrations (same validation; in exported
+  runtime builds host-filesystem paths are denied entirely).
+- **Filesystem access modes** (`AssetAccessMode`): `EditorFilesystem` (trusted
+  editor process), `ProjectFilesystem` (paths must resolve inside the project
+  root, symlink-safe), `PackageOnly` (exported runtime: pak entries only, a
+  miss is an error, never a host-disk fallback). `ignis.scene.save` from Lua
+  follows the same policy.
+- **Resource budgets**: Lua instruction budget + memory cap per engine,
+  bounded Lua→JSON conversion, scene parse limits (depth/size/counts),
+  package index limits, command size/batch/recursion limits.

@@ -210,7 +210,9 @@ int l_entity_name(lua_State* L) {
 
 int l_entity_set_name(lua_State* L) {
     EntityId e = static_cast<EntityId>(luaL_checkinteger(L, 1));
-    get_scene(L)->world().set_name(e, luaL_checkstring(L, 2));
+    World& w = get_scene(L)->world();
+    if (!w.alive(e)) return 0; // dead/stale entity id
+    w.set_name(e, luaL_checkstring(L, 2));
     return 0;
 }
 
@@ -240,6 +242,7 @@ int l_entity_add_component(lua_State* L) {
     EntityId e = static_cast<EntityId>(luaL_checkinteger(L, 1));
     const char* comp = luaL_checkstring(L, 2);
     World& w = get_scene(L)->world();
+    if (!w.alive(e)) { lua_pushboolean(L, 0); return 1; } // dead/stale entity id
     const ComponentTypeInfo* info = w.registry().find_by_name(comp ? comp : "");
     if (!info) { lua_pushnil(L); lua_pushstring(L, "unknown component"); return 2; }
     nlohmann::json props = lua_isnoneornil(L, 3) ? nlohmann::json::object() : lua_to_json(L, 3);
@@ -278,6 +281,7 @@ int l_entity_remove_component(lua_State* L) {
     EntityId e = static_cast<EntityId>(luaL_checkinteger(L, 1));
     const char* comp = luaL_checkstring(L, 2);
     World& w = get_scene(L)->world();
+    if (!w.alive(e)) return 0; // dead/stale entity id
     const ComponentTypeInfo* info = w.registry().find_by_name(comp ? comp : "");
     if (!info) return 0;
     info->remove(w, e);
