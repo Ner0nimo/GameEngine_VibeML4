@@ -52,7 +52,8 @@ void main() {
     vec3 viewPos = vec3(ubo.camView * vec4(worldPos, 1.0));
     vec3 Nv = normalize(mat3(ubo.camView) * N);
     vec3 Rv = reflect(normalize(viewPos), Nv); // mirror dir in view space
-    if (Rv.z >= -0.02) { rt_ssr = vec4(0.0); return; } // grazing / toward camera
+    if (Rv.z >= -0.02) { rt_ssr = vec4(0.0, 0.0, 0.0, 0.0); return; } // DEBUG: dir-rejected
+    rt_ssr = vec4(0.0, 0.0, 0.0, 0.25); // DEBUG: dir ok, before march
 
     vec3 V = normalize(ubo.camPos.xyz - worldPos);
     float NdotV = clamp(dot(N, V), 0.0, 1.0);
@@ -97,7 +98,7 @@ void main() {
         prevT = tt;
         prevDiff = diff;
     }
-    if (hitT < 0.0) { rt_ssr = vec4(0.0); return; }
+    if (hitT < 0.0) return; // DEBUG: keeps 0.25 (dir ok, no hit)
 
     // Confidence: screen-edge fade, ray-length fade, grazing-angle fade.
     float edge = smoothstep(0.0, 0.05, min(min(hitUV.x, 1.0 - hitUV.x), min(hitUV.y, 1.0 - hitUV.y)));
@@ -105,5 +106,5 @@ void main() {
     float confidence = edge * rayFade * NdotV;
 
     vec3 refl = texture(sampler2D(tex_hdr_prev, samp_hdr_prev), hitUV).rgb;
-    rt_ssr = vec4(refl, confidence);
+    rt_ssr = vec4(refl, 1.0); // DEBUG: hit
 }
