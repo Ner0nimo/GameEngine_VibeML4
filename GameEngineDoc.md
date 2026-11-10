@@ -47,6 +47,8 @@ We're building a production-grade, simple and straight-forward 3D Game Engine fo
 - Import gltf meshes with materials and textures
 - Editor has gizmo to position them in the world
 - PBR material workflow
+- Directional + point + spot lights (PBR Cook-Torrance per light; shadows on
+  the directional light only)
 - IBL with HDRIs from https://polyhaven.com/hdris (diffuse irradiance +
   mipmapped prefiltered radiance cubemap + BRDF LUT for roughness-correct
   specular reflections, built on CPU at load time)

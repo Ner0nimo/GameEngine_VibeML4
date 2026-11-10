@@ -70,6 +70,61 @@ TEST(Scene, SaveLoadFile) {
     std::filesystem::remove(path);
 }
 
+TEST(Scene, LightComponentsRoundTrip) {
+    Scene scene("lights");
+    register_builtin_components(scene.world());
+    EntityId sun = scene.world().create_entity("sun");
+    auto& dl = scene.world().emplace<DirectionalLightComponent>(sun);
+    dl.direction = {0.3f, -1.f, 0.2f};
+    dl.color = {1.f, 0.9f, 0.8f};
+    dl.intensity = 3.5f;
+    dl.cast_shadow = false;
+    EntityId lamp = scene.world().create_entity("lamp");
+    auto& pl = scene.world().emplace<PointLightComponent>(lamp);
+    pl.color = {0.2f, 0.4f, 1.f};
+    pl.intensity = 42.f;
+    pl.range = 7.5f;
+    EntityId torch = scene.world().create_entity("torch");
+    auto& sl = scene.world().emplace<SpotLightComponent>(torch);
+    sl.direction = {0.f, 0.f, -1.f};
+    sl.color = {1.f, 0.5f, 0.25f};
+    sl.intensity = 12.f;
+    sl.range = 9.f;
+    sl.inner_angle_deg = 20.f;
+    sl.outer_angle_deg = 35.f;
+
+    Scene loaded = Scene::deserialize(scene.serialize());
+    EntityId l_sun = NULL_ENTITY, l_lamp = NULL_ENTITY, l_torch = NULL_ENTITY;
+    for (EntityId e : loaded.world().all_entities()) {
+        const std::string n = loaded.world().name_of(e);
+        if (n == "sun") l_sun = e;
+        if (n == "lamp") l_lamp = e;
+        if (n == "torch") l_torch = e;
+    }
+    ASSERT_NE(l_sun, NULL_ENTITY);
+    ASSERT_NE(l_lamp, NULL_ENTITY);
+    ASSERT_NE(l_torch, NULL_ENTITY);
+    const auto* dl2 = loaded.world().get<DirectionalLightComponent>(l_sun);
+    ASSERT_NE(dl2, nullptr);
+    EXPECT_NEAR(dl2->direction.x, 0.3f, 1e-6f);
+    EXPECT_NEAR(dl2->color.y, 0.9f, 1e-6f);
+    EXPECT_NEAR(dl2->intensity, 3.5f, 1e-6f);
+    EXPECT_FALSE(dl2->cast_shadow);
+    const auto* pl2 = loaded.world().get<PointLightComponent>(l_lamp);
+    ASSERT_NE(pl2, nullptr);
+    EXPECT_NEAR(pl2->color.z, 1.f, 1e-6f);
+    EXPECT_NEAR(pl2->intensity, 42.f, 1e-6f);
+    EXPECT_NEAR(pl2->range, 7.5f, 1e-6f);
+    const auto* sl2 = loaded.world().get<SpotLightComponent>(l_torch);
+    ASSERT_NE(sl2, nullptr);
+    EXPECT_NEAR(sl2->direction.z, -1.f, 1e-6f);
+    EXPECT_NEAR(sl2->color.y, 0.5f, 1e-6f);
+    EXPECT_NEAR(sl2->intensity, 12.f, 1e-6f);
+    EXPECT_NEAR(sl2->range, 9.f, 1e-6f);
+    EXPECT_NEAR(sl2->inner_angle_deg, 20.f, 1e-6f);
+    EXPECT_NEAR(sl2->outer_angle_deg, 35.f, 1e-6f);
+}
+
 TEST(Scene, SystemsRunInOrder) {
     Scene scene("s");
     register_builtin_components(scene.world());

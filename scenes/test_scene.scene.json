@@ -69,6 +69,25 @@
         "AudioSource": { "path": "assets/test.wav", "volume": 0.8, "pitch": 1, "loop": true,
                          "play_on_start": true, "spatial": true, "min_distance": 1, "max_distance": 30 }
       }
+    },
+    {
+      "id": 8,
+      "name": "Lamp",
+      "parent": 0,
+      "components": {
+        "Transform": { "position": [2, 2, 2], "rotation": [1, 0, 0, 0], "scale": [1, 1, 1] },
+        "PointLight": { "color": [1, 0.85, 0.6], "intensity": 15, "range": 12 }
+      }
+    },
+    {
+      "id": 9,
+      "name": "Torch",
+      "parent": 0,
+      "components": {
+        "Transform": { "position": [-2, 1.5, 2], "rotation": [1, 0, 0, 0], "scale": [1, 1, 1] },
+        "SpotLight": { "direction": [0, -0.3, -1], "color": [1, 0.7, 0.4], "intensity": 20,
+                        "range": 10, "inner_angle_deg": 25, "outer_angle_deg": 40 }
+      }
     }
   ],
   "prefabs": {

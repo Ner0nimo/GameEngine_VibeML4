@@ -44,6 +44,15 @@ layout(set = 1, binding = 256) uniform UniformBuffer {
     float shadowBoxWidth;     // world width of the light ortho box (for texel size)
     float _pad2;
     vec4 clearColor;
+    // Local lights (unshadowed), fixed-capacity vec4 arrays.
+    vec4 pointPosRange[8];   // xyz = world pos, w = range
+    vec4 pointColorInt[8];   // rgb = color, w = intensity
+    vec4 spotPos[4];         // xyz = world pos
+    vec4 spotDirCone[4];     // xyz = direction, w = cos(outer angle)
+    vec4 spotColorInt[4];    // rgb = color, w = intensity
+    vec4 spotInnerRange[4];  // x = cos(inner angle), y = range
+    vec2 lightCounts;        // x = point count, y = spot count
+    float _pad3, _pad4;
 } ubo;
 
 const float PI = 3.14159265359;
@@ -72,6 +81,26 @@ float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
 // Percentage-closer soft shadows: blocker search -> penumbra width from
 // similar triangles -> PCF kernel scaled to the penumbra. Contact points get
 // hard shadows, distant occluders get wide soft ones.
+// Cook-Torrance direct term (diffuse + specular) * NdotL for one light
+// direction L, without color/intensity/attenuation — callers multiply those.
+vec3 directTerm(vec3 N, vec3 V, vec3 L, vec3 albedo, float roughness, float metallic, vec3 F0) {
+    float NdotL = max(dot(N, L), 0.0);
+    if (NdotL <= 0.0) return vec3(0.0);
+    vec3 H = normalize(V + L);
+    vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+    float NDF = distributionGGX(N, H, roughness);
+    float G = geometrySmith(N, V, L, roughness);
+    vec3 specular = (NDF * G * F) / max(4.0 * max(dot(N, V), 0.0) * NdotL, 1e-7);
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+    return (kD * albedo / PI + specular) * NdotL;
+}
+
+// Smooth inverse-square-ish attenuation with a cutoff at the light range.
+float rangeAttenuation(float dist, float range) {
+    float x = clamp(1.0 - pow(dist / max(range, 1e-4), 4.0), 0.0, 1.0);
+    return x * x / (dist * dist + 1.0);
+}
+
 float shadowPCSS(vec4 worldPos, vec3 N, vec3 L) {
     vec4 sc = ubo.lightViewProj * worldPos;
     vec3 proj = sc.xyz / sc.w;
@@ -133,20 +162,40 @@ void main() {
 
     vec3 V = normalize(ubo.camPos - worldPos);
     vec3 L = normalize(-ubo.lightDir);
-    vec3 H = normalize(V + L);
     float NdotV = max(dot(N, V), 0.0);
 
     vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
 
     // Directional light with PCSS soft shadow.
     float shadow = shadowPCSS(vec4(worldPos, 1.0), N, L);
-    float NdotL = max(dot(N, L), 0.0);
-    vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-    float NDF = distributionGGX(N, H, roughness);
-    float G = geometrySmith(N, V, L, roughness);
-    vec3 specular = (NDF * G * F) / max(4.0 * NdotV * NdotL, 1e-7);
-    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
-    vec3 direct = (kD * albedo.rgb / PI + specular) * ubo.lightColor * ubo.lightIntensity * NdotL * shadow;
+    vec3 direct = directTerm(N, V, L, albedo.rgb, roughness, metallic, F0)
+                * ubo.lightColor * ubo.lightIntensity * shadow;
+
+    // Point lights (unshadowed).
+    for (int i = 0; i < 8; ++i) {
+        if (float(i) >= ubo.lightCounts.x) break;
+        vec3 toL = ubo.pointPosRange[i].xyz - worldPos;
+        float dist = length(toL);
+        vec3 Li = toL / max(dist, 1e-4);
+        float att = rangeAttenuation(dist, ubo.pointPosRange[i].w);
+        direct += directTerm(N, V, Li, albedo.rgb, roughness, metallic, F0)
+                * ubo.pointColorInt[i].rgb * ubo.pointColorInt[i].w * att;
+    }
+
+    // Spot lights (unshadowed): cone penumbra between inner and outer angle.
+    for (int i = 0; i < 4; ++i) {
+        if (float(i) >= ubo.lightCounts.y) break;
+        vec3 toL = ubo.spotPos[i].xyz - worldPos;
+        float dist = length(toL);
+        vec3 Li = toL / max(dist, 1e-4);
+        float att = rangeAttenuation(dist, ubo.spotInnerRange[i].y);
+        float cosOuter = ubo.spotDirCone[i].w;
+        float cosInner = ubo.spotInnerRange[i].x;
+        float cone = clamp((dot(-Li, ubo.spotDirCone[i].xyz) - cosOuter)
+                           / max(cosInner - cosOuter, 1e-4), 0.0, 1.0);
+        direct += directTerm(N, V, Li, albedo.rgb, roughness, metallic, F0)
+                * ubo.spotColorInt[i].rgb * ubo.spotColorInt[i].w * att * cone;
+    }
 
     // IBL ambient: irradiance cubemap (diffuse) + split-sum specular
     // (prefiltered radiance cubemap by roughness, modulated by the BRDF LUT).

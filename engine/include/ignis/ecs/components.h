@@ -64,6 +64,17 @@ struct PointLightComponent {
     f32 range = 20.f;
 };
 
+// Spot light: position comes from the entity's TransformComponent, direction
+// is world-space (same convention as DirectionalLightComponent).
+struct SpotLightComponent {
+    math::Vec3 direction{0.f, -1.f, 0.f};
+    math::Vec3 color{1.f, 1.f, 1.f};
+    f32 intensity = 10.f;
+    f32 range = 20.f;
+    f32 inner_angle_deg = 30.f; // cone half-angle, full brightness
+    f32 outer_angle_deg = 45.f; // cone half-angle, penumbra edge (0 = hard edge)
+};
+
 struct MeshRendererComponent {
     std::string model_path; // glTF asset
     // Material overrides by material slot (index -> partial material JSON
@@ -179,6 +190,30 @@ struct ComponentIO<PointLightComponent> {
 };
 
 template <>
+struct ComponentIO<SpotLightComponent> {
+    static nlohmann::json to_json(const SpotLightComponent& l) {
+        nlohmann::json j;
+        ::ignis::to_json(j["direction"], l.direction);
+        ::ignis::to_json(j["color"], l.color);
+        j["intensity"] = l.intensity;
+        j["range"] = l.range;
+        j["inner_angle_deg"] = l.inner_angle_deg;
+        j["outer_angle_deg"] = l.outer_angle_deg;
+        return j;
+    }
+    static SpotLightComponent from_json(const nlohmann::json& j) {
+        SpotLightComponent l;
+        if (j.contains("direction")) ::ignis::from_json(j["direction"], l.direction);
+        if (j.contains("color")) ::ignis::from_json(j["color"], l.color);
+        if (j.contains("intensity")) l.intensity = j["intensity"].get<f32>();
+        if (j.contains("range")) l.range = j["range"].get<f32>();
+        if (j.contains("inner_angle_deg")) l.inner_angle_deg = j["inner_angle_deg"].get<f32>();
+        if (j.contains("outer_angle_deg")) l.outer_angle_deg = j["outer_angle_deg"].get<f32>();
+        return l;
+    }
+};
+
+template <>
 struct ComponentIO<MeshRendererComponent> {
     static nlohmann::json to_json(const MeshRendererComponent& m) {
         return {{"model_path", m.model_path}};
@@ -197,6 +232,7 @@ inline void register_builtin_components(World& world) {
     world.register_component_type<CameraComponent>("Camera");
     world.register_component_type<DirectionalLightComponent>("DirectionalLight");
     world.register_component_type<PointLightComponent>("PointLight");
+    world.register_component_type<SpotLightComponent>("SpotLight");
     world.register_component_type<MeshRendererComponent>("MeshRenderer");
 }
 
