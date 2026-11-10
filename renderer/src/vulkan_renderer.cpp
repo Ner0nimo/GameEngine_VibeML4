@@ -1522,6 +1522,7 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
             ++spotCount;
         }
         lu.lightCounts = math::Vec2(static_cast<f32>(pointCount), static_cast<f32>(spotCount));
+        IGNIS_INFO("render: gathered lights points={} spots={}", pointCount, spotCount);
         // clear color from active camera component
         lu.clearColor = math::Vec4(0.02f, 0.02f, 0.03f, 1.f);
         for (EntityId e : scene.world().view<CameraComponent>()) {
