@@ -48,7 +48,9 @@ window/     ignis_window: GLFW wrapper (Vulkan surface in graphics builds)
 renderer/   ignis_renderer: IRenderer iface, VulkanRenderer (NVRHI), picking,
             IBL (CPU equirect->irradiance), debug lines
 runtime/    ignis_runtime exe: --headless for CI/tests, --pak for exported games
-editor/     ignis_editor exe (graphics builds only): window + renderer + UI
+editor/     ignis_editor exe (graphics builds only): window + Vulkan renderer +
+            ImGui editor UI (menu/toolbar, hierarchy, inspector, console,
+            asset browser, status bar, ImGuizmo viewport transform gizmo)
 tools/exporter/  ignis_export: packs scene+assets+scripts into game.ignispak
 tests/      GTest suites + integration test (scenes/test_scene.scene.json)
 scenes/     scene files (JSON)

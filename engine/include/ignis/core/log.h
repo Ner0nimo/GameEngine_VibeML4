@@ -4,6 +4,7 @@
 
 #include <format>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -16,6 +17,12 @@ enum class LogLevel : u8 { Trace = 0, Debug, Info, Warn, Error, Fatal };
 // Macros below keep call sites terse: IGNIS_INFO("x={}", x);
 class Logger {
 public:
+    // Optional listener (e.g. the editor's in-app console). Invoked for every
+    // message that passes the level filter, AFTER the message is written, so
+    // listeners may safely log themselves. Not thread-confined: set once at
+    // startup before spawning threads.
+    using Listener = std::function<void(LogLevel, const std::string&)>;
+
     static Logger& instance();
 
     Logger(const Logger&) = delete;
@@ -26,6 +33,8 @@ public:
 
     // Open an additional file sink. Empty path disables it.
     void set_file(const std::string& path);
+
+    void set_listener(Listener l) { listener_ = std::move(l); }
 
     void log(LogLevel level, const std::string& msg);
 
@@ -41,6 +50,7 @@ private:
     LogLevel level_ = LogLevel::Info;
     std::mutex mutex_;
     std::ofstream file_;
+    Listener listener_;
 };
 
 inline const char* to_string(LogLevel l) noexcept {

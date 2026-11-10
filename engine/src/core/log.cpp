@@ -43,13 +43,19 @@ void Logger::log(LogLevel level, const std::string& msg) {
 
     std::string line = std::format("[{}] [{}] {}", time_str, to_string(level), msg);
 
-    std::lock_guard lock(mutex_);
-    std::fputs(line.c_str(), stderr);
-    std::fputc('\n', stderr);
-    if (file_.is_open()) {
-        file_ << line << '\n';
-        file_.flush();
+    Listener listener;
+    {
+        std::lock_guard lock(mutex_);
+        std::fputs(line.c_str(), stderr);
+        std::fputc('\n', stderr);
+        if (file_.is_open()) {
+            file_ << line << '\n';
+            file_.flush();
+        }
+        listener = listener_;
     }
+    // Invoke outside the lock so a listener may safely call back into log().
+    if (listener) listener(level, msg);
 }
 
 } // namespace ignis

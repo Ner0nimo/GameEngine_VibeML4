@@ -12,6 +12,7 @@ target_link_libraries(ignis_editor PRIVATE
     ignis_window
     ignis_renderer
     ignis_imgui
+    ignis_imguizmo
     glfw
     nvrhi
 )

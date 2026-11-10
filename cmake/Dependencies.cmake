@@ -122,6 +122,10 @@ FetchContent_Declare(imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
     GIT_TAG v1.93.0
     GIT_SHALLOW TRUE)
+FetchContent_Declare(imguizmo
+    GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
+    GIT_TAG 105e4fde45e4e74aae8973d98750820ef7aca7e2
+    GIT_SHALLOW FALSE) # small repo; pin the exact commit
 FetchContent_Declare(vulkan_headers_ignis
     GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
     GIT_TAG vulkan-sdk-1.4.363.0
@@ -167,6 +171,17 @@ add_library(ignis_imgui STATIC ${IMGUI_SOURCES})
 target_include_directories(ignis_imgui SYSTEM PUBLIC
     "${imgui_SOURCE_DIR}" "${imgui_SOURCE_DIR}/backends")
 # Third-party code: no ignis_apply_warnings on purpose.
+
+# ImGuizmo (viewport transform gizmo for the editor), pinned commit. The repo
+# ships no CMakeLists, so we only populate it (not MakeAvailable) and build
+# the single TU ourselves below.
+cmake_policy(PUSH)
+cmake_policy(SET CMP0169 OLD)
+FetchContent_Populate(imguizmo)
+cmake_policy(POP)
+add_library(ignis_imguizmo STATIC "${imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp")
+target_include_directories(ignis_imguizmo SYSTEM PUBLIC "${imguizmo_SOURCE_DIR}/src")
+target_link_libraries(ignis_imguizmo PUBLIC ignis_imgui)
 
 if(IGNIS_WITH_GRAPHICS)
     # NVRHI fetches its own pinned Vulkan-Headers (its shared-build dispatch init

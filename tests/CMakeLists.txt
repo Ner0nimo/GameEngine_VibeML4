@@ -1,5 +1,6 @@
 add_executable(ignis_tests
     src/test_main.cpp
+    src/test_log.cpp
     src/test_math.cpp
     src/test_ecs.cpp
     src/test_scene.cpp

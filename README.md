@@ -37,7 +37,7 @@ cmake --preset full && cmake --build --preset full
 | `physics/` | reactphysics3d: RigidBody/Collider, raycast, collisions |
 | `audio/` | miniaudio playback + decoding, null-device headless mode, `AudioSource` component + `AudioSystem` (spatial 3D audio, pak-aware playback) |
 | `window/` `renderer/` | GLFW window, NVRHI/Vulkan renderer (PBR, shadows, SSAO, IBL, HDR tonemap) |
-| `runtime/` `editor/` | game runtime (headless-capable) and editor executables |
+| `runtime/` `editor/` | game runtime (headless-capable) and editor executable (ImGui UI: hierarchy, inspector, console, asset browser, gizmo) |
 | `tools/exporter/` | `ignis_export` CLI: packs a game into `game.ignispak` |
 | `tests/` | GTest unit tests + integration test over `scenes/test_scene.scene.json` |
 | `scenes/` `scripts/` `assets/` | test scene, Lua scripts, test assets |

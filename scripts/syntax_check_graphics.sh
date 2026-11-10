@@ -13,7 +13,7 @@ INCLUDES="-I$ROOT/window/include -I$ROOT/renderer/include -I$ROOT/editor/include
  -I$ROOT/physics/include -I$ROOT/audio/include -I$GEN"
 SYSINCLUDES="-isystem $DEPS/glfw-src/include -isystem $DEPS/nvrhi-src/include \
  -isystem $DEPS/vulkan_headers_ignis-src/include -isystem $DEPS/spirv_headers-src/include \
- -isystem $DEPS/imgui-src -isystem $DEPS/imgui-src/backends \
+ -isystem $DEPS/imgui-src -isystem $DEPS/imgui-src/backends -isystem $DEPS/imguizmo-src/src \
  -isystem $DEPS/glm-src -isystem $DEPS/json-src/include -isystem $DEPS/cgltf-src \
  -isystem $DEPS/stb-src -isystem $DEPS/miniaudio-src -isystem $DEPS/lua-src \
  -isystem $DEPS/reactphysics3d-src/include \
@@ -39,7 +39,7 @@ fi
 for f in $FILES; do
     echo "== $f"
     EXTRA=""
-    case "$f" in */editor/*|*/tests/*) EXTRA="-DGLFW_INCLUDE_NONE -DIGNIS_TEST_DATA_DIR=\"\\\"$ROOT/tests/data\\\"\" -DIGNIS_SCENES_DIR=\"\\\"$ROOT/scenes\\\"\" -DIGNIS_SCRIPTS_DIR=\"\\\"$ROOT/scripts\\\"\"" ;; esac
+    case "$f" in *editor*|*tests*) EXTRA="-DGLFW_INCLUDE_NONE -DIGNIS_TEST_DATA_DIR=\"\\\"$ROOT/tests/data\\\"\" -DIGNIS_SCENES_DIR=\"\\\"$ROOT/scenes\\\"\" -DIGNIS_SCRIPTS_DIR=\"\\\"$ROOT/scripts\\\"\"" ;; esac
     /usr/bin/c++ $FLAGS $EXTRA $INCLUDES $SYSINCLUDES -c "$f" -o /dev/null
 done
 echo "ALL OK"
