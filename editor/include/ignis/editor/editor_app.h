@@ -10,6 +10,7 @@
 #include "ignis/ecs/entity.h"
 #include "ignis/physics/physics_world.h"
 #include "ignis/renderer/vulkan_renderer.h"
+#include "ignis/scene/history.h"
 #include "ignis/scene/scene.h"
 #include "ignis/scripting/script_engine.h"
 #include "ignis/window/window.h"
@@ -53,6 +54,7 @@ private:
     std::unique_ptr<AudioEngine> audio_;
     std::unique_ptr<AudioSystem> audio_sys_;
     std::unique_ptr<CommandProcessor> commands_;
+    std::unique_ptr<SceneHistory> history_; // undo/redo for scene mutations
     EntityId selected_ = 0;
     bool playing_ = false;
 
@@ -153,6 +155,8 @@ private:
     void assign_selected_asset();
     void delete_entity(EntityId e);
     void duplicate_entity(EntityId e);
+    void undo();
+    void redo();
 #endif
 };
 

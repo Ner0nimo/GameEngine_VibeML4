@@ -2,7 +2,8 @@
 // toolbar, hierarchy with filter + drag&drop reparenting, inspector, console
 // with level filters + JSON command input, asset browser, stats graph, status
 // bar, viewport overlay, transform gizmo with space/snap) + play-mode
-// snapshot/restore + AI-agent command interface (--commands).
+// snapshot/restore + undo/redo (SceneHistory transactions) + AI-agent
+// command interface (--commands).
 // The ImGui pass is recorded on the swapchain image after the scene render
 // (render pass with loadOp=LOAD, initial layout PRESENT_SRC_KHR) and before
 // present().
@@ -138,6 +139,7 @@ Result<void> EditorApp::init_scene_and_systems(const std::string& scene_path,
     AudioSystem::register_components(scene_->world());
     if (auto r = scene_->load_file(scene_path); !r.ok())
         return Result<void>::failure(r.error());
+    history_ = std::make_unique<SceneHistory>(*scene_);
 
     scripts_ = std::make_unique<ScriptEngine>();
     if (auto r = scripts_->init(scene_.get(), assets_.get()); !r.ok())
@@ -487,6 +489,11 @@ void EditorApp::handle_shortcuts() {
     if (ImGui::IsKeyPressed(ImGuiKey_F, false) && has_sel) frame_selected();
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) save_scene();
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_N, false)) new_scene();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+        if (io.KeyShift) redo();
+        else undo();
+    }
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo();
     if (ImGui::IsKeyPressed(ImGuiKey_P, false)) {
         if (playing_) stop_play();
         else start_play();
@@ -518,6 +525,7 @@ void EditorApp::new_scene() {
     empty["prefabs"] = nlohmann::json::object();
     if (auto r = scene_->load_json(empty); r.ok()) {
         selected_ = NULL_ENTITY;
+        history_->clear();
         scene_path_ = "scenes/untitled.scene.json"; // where Ctrl+S will write
         update_window_title();
         IGNIS_INFO("new empty scene");
@@ -530,6 +538,7 @@ void EditorApp::open_scene(const std::string& path) {
     stop_play();
     if (auto r = scene_->load_file(path); r.ok()) {
         selected_ = NULL_ENTITY;
+        history_->clear();
         scene_path_ = path;
         update_window_title();
         IGNIS_INFO("opened scene {}", path);
@@ -540,8 +549,12 @@ void EditorApp::open_scene(const std::string& path) {
 
 void EditorApp::reload_scene() {
     stop_play();
-    if (auto r = scene_->load_file(scene_path_); r.ok()) IGNIS_INFO("scene reloaded from {}", scene_path_);
-    else IGNIS_ERROR("{}", r.error());
+    if (auto r = scene_->load_file(scene_path_); r.ok()) {
+        history_->clear();
+        IGNIS_INFO("scene reloaded from {}", scene_path_);
+    } else {
+        IGNIS_ERROR("{}", r.error());
+    }
 }
 
 void EditorApp::start_play() {
@@ -570,6 +583,7 @@ void EditorApp::stop_play() {
 
 EntityId EditorApp::create_gameobject(const std::string& kind) {
     World& w = scene_->world();
+    history_->begin("create " + kind);
     EntityId e = w.create_entity(kind);
     w.emplace<TransformComponent>(e);
     if (kind == "Cube") {
@@ -584,6 +598,7 @@ EntityId EditorApp::create_gameobject(const std::string& kind) {
         w.emplace<AudioSourceComponent>(e);
     }
     selected_ = e;
+    history_->commit();
     IGNIS_INFO("created '{}' (#%llu)", kind, static_cast<unsigned long long>(e));
     return e;
 }
@@ -612,15 +627,18 @@ void EditorApp::frame_selected() {
 
 void EditorApp::delete_entity(EntityId e) {
     if (!scene_->world().alive(e)) return;
+    history_->begin("delete '" + scene_->world().name_of(e) + "'");
     scripts_->on_entity_destroyed(e); // fire on_destroy
     scene_->world().destroy_entity(e);
     if (selected_ == e) selected_ = NULL_ENTITY;
+    history_->commit();
     IGNIS_INFO("deleted entity {}", e);
 }
 
 void EditorApp::duplicate_entity(EntityId e) {
     if (!scene_->world().alive(e)) return;
     World& w = scene_->world();
+    history_->begin("duplicate '" + w.name_of(e) + "'");
     EntityId copy = w.create_entity(w.name_of(e) + " copy");
     w.set_parent(copy, w.parent_of(e));
     if (const auto* t = w.get<TransformComponent>(e)) {
@@ -634,10 +652,33 @@ void EditorApp::duplicate_entity(EntityId e) {
             info->copy(w, e, copy);
     }
     selected_ = copy;
+    history_->commit();
+}
+
+void EditorApp::undo() {
+    if (!history_ || !history_->can_undo()) return;
+    const std::string label = history_->undo_label();
+    if (history_->undo()) {
+        // Entity ids survive load_json; drop the selection only if the entity
+        // no longer exists in the restored state.
+        if (selected_ != NULL_ENTITY && !scene_->world().alive(selected_)) selected_ = NULL_ENTITY;
+        IGNIS_INFO("undo '{}'", label);
+    }
+}
+
+void EditorApp::redo() {
+    if (!history_ || !history_->can_redo()) return;
+    const std::string label = history_->redo_label();
+    if (history_->redo()) {
+        if (selected_ != NULL_ENTITY && !scene_->world().alive(selected_)) selected_ = NULL_ENTITY;
+        IGNIS_INFO("redo '{}'", label);
+    }
 }
 
 void EditorApp::run_console_command(const std::string& line) {
     if (line.empty()) return;
+    // Agent commands are undoable like any other scene mutation.
+    history_->begin("cmd: " + (line.size() > 60 ? line.substr(0, 60) + "..." : line));
     try {
         const CommandResult r = commands_->execute(nlohmann::json::parse(line));
         // Results flow into the in-app console through the logger listener.
@@ -646,6 +687,7 @@ void EditorApp::run_console_command(const std::string& line) {
     } catch (const std::exception& e) {
         IGNIS_ERROR("bad command JSON: {}", e.what());
     }
+    history_->commit();
 }
 
 void EditorApp::draw_menu_bar() {
@@ -667,6 +709,15 @@ void EditorApp::draw_menu_bar() {
     draw_gameobject_menu();
     if (ImGui::BeginMenu("Edit")) {
         const bool has_sel = selected_ != NULL_ENTITY && scene_->world().alive(selected_);
+        const bool can_undo = history_ && history_->can_undo();
+        const bool can_redo = history_ && history_->can_redo();
+        const std::string undo_label = "Undo" + (can_undo ? " " + history_->undo_label() : std::string());
+        if (ImGui::MenuItem(undo_label.c_str(), "Ctrl+Z", false, can_undo)) undo();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("undo the last scene change");
+        const std::string redo_label = "Redo" + (can_redo ? " " + history_->redo_label() : std::string());
+        if (ImGui::MenuItem(redo_label.c_str(), "Ctrl+Shift+Z / Ctrl+Y", false, can_redo)) redo();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("redo the last undone change");
+        ImGui::Separator();
         if (ImGui::MenuItem("Delete selected", "Del", false, has_sel)) delete_entity(selected_);
         if (ImGui::MenuItem("Duplicate selected", "Ctrl+D", false, has_sel)) duplicate_entity(selected_);
         if (ImGui::MenuItem("Frame selected", "F", false, has_sel)) frame_selected();
@@ -747,6 +798,7 @@ void EditorApp::draw_help_window() {
         ImGui::Text("Viewport: RMB drag = look, WASDQE = fly, LMB = select entity");
         ImGui::Text("Gizmo:    W translate, E rotate, R scale; toolbar = space + snap");
         ImGui::Text("Edit:     Del delete, Ctrl+D duplicate, F frame selected");
+        ImGui::Text("History:  Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo");
         ImGui::Text("File:     Ctrl+N new scene, Ctrl+S save, Esc quit");
         ImGui::Text("Run:      P play/pause; Stop restores the pre-play scene state");
         ImGui::Text("Console:  filter by level/text; Enter runs a JSON agent command");
@@ -837,6 +889,22 @@ void EditorApp::draw_toolbar() {
     ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
+    const bool can_undo = history_ && history_->can_undo();
+    const bool can_redo = history_ && history_->can_redo();
+    ImGui::BeginDisabled(!can_undo);
+    if (ImGui::SmallButton("Undo")) undo();
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered() && can_undo)
+        ImGui::SetTooltip("Undo '%s' (Ctrl+Z)", history_->undo_label().c_str());
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!can_redo);
+    if (ImGui::SmallButton("Redo")) redo();
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered() && can_redo)
+        ImGui::SetTooltip("Redo '%s' (Ctrl+Shift+Z / Ctrl+Y)", history_->redo_label().c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
     if (selected_ != NULL_ENTITY && scene_->world().alive(selected_))
         ImGui::Text("Selected: %s (#%llu)", scene_->world().name_of(selected_).c_str(),
                     static_cast<unsigned long long>(selected_));
@@ -864,8 +932,12 @@ void EditorApp::draw_hierarchy_node(EntityId e) {
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("IGNIS_ENTITY")) {
             const EntityId child = *static_cast<const EntityId*>(payload->Data);
-            if (child != e && w.set_parent(child, e))
-                IGNIS_INFO("reparented '{}' under '{}'", w.name_of(child).c_str(), w.name_of(e).c_str());
+            if (child != e) {
+                history_->begin("reparent '" + w.name_of(child) + "' under '" + w.name_of(e) + "'");
+                if (w.set_parent(child, e)) // rejects cycles: commit() then discards the no-op entry
+                    IGNIS_INFO("reparented '{}' under '{}'", w.name_of(child).c_str(), w.name_of(e).c_str());
+                history_->commit();
+            }
         }
         ImGui::EndDragDropTarget();
     }
@@ -939,7 +1011,9 @@ void EditorApp::draw_hierarchy() {
         if (ImGui::BeginPopupModal("Rename entity", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::InputText("name", rename_buf_, sizeof(rename_buf_));
             if (ImGui::Button("OK")) {
+                history_->begin("rename entity");
                 w.set_name(rename_target_, rename_buf_);
+                history_->commit();
                 rename_target_ = NULL_ENTITY;
                 ImGui::CloseCurrentPopup();
             }
@@ -972,6 +1046,7 @@ void EditorApp::draw_inspector() {
     {
         char name_buf[128];
         std::snprintf(name_buf, sizeof(name_buf), "%s", w.name_of(selected_).c_str());
+        history_->begin("edit name"); // coalesced per drag/typing session by SceneHistory
         if (ImGui::InputText("name", name_buf, sizeof(name_buf))) w.set_name(selected_, name_buf);
     }
     const EntityId parent = w.parent_of(selected_);
@@ -986,11 +1061,14 @@ void EditorApp::draw_inspector() {
         const bool open = ImGui::CollapsingHeader(info->name.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
         ImGui::SameLine(ImGui::GetWindowWidth() - 30.f);
         if (ImGui::SmallButton("x")) {
+            history_->begin("remove " + info->name);
             info->remove(w, selected_);
+            history_->commit();
             ImGui::PopID();
             continue;
         }
         if (open) {
+            history_->begin("edit " + info->name); // one undo entry per drag, not per frame
             if (info->name == "Transform") edit_transform(*w.get<TransformComponent>(selected_));
             else if (info->name == "Camera") edit_camera(*w.get<CameraComponent>(selected_));
             else if (info->name == "DirectionalLight") edit_directional_light(*w.get<DirectionalLightComponent>(selected_));
@@ -1032,7 +1110,11 @@ void EditorApp::draw_inspector() {
             for (const auto& [type, storage] : w.storages())
                 if (type == info->type) { has = storage->has(selected_); break; }
             if (has) continue;
-            if (ImGui::Selectable(name.c_str())) info->add_default(w, selected_);
+            if (ImGui::Selectable(name.c_str())) {
+                history_->begin("add " + name);
+                info->add_default(w, selected_);
+                history_->commit();
+            }
         }
         ImGui::EndCombo();
     }
@@ -1166,6 +1248,7 @@ void EditorApp::assign_selected_asset() {
         IGNIS_WARN("target component not registered");
         return;
     }
+    history_->begin("assign '" + selected_asset_ + "'");
     bool has = false;
     for (const auto& [type, storage] : w.storages())
         if (type == info->type) { has = storage->has(selected_); break; }
@@ -1176,6 +1259,7 @@ void EditorApp::assign_selected_asset() {
         w.get<ScriptComponent>(selected_)->path = selected_asset_;
     else
         w.get<AudioSourceComponent>(selected_)->path = selected_asset_;
+    history_->commit();
     IGNIS_INFO("assigned '{}' to '{}'", selected_asset_, w.name_of(selected_));
 }
 
@@ -1248,10 +1332,11 @@ void EditorApp::draw_status_bar(f32 dt) {
     const RenderStats st = renderer_->stats();
     const char* gizmo_name = gizmo_op_ == GizmoOp::Translate ? "Translate"
                            : gizmo_op_ == GizmoOp::Rotate ? "Rotate" : "Scale";
-    ImGui::Text("%.0f fps  %.2f ms | draws %u | tris %u | entities %llu | gizmo %s | %s",
+    ImGui::Text("%.0f fps  %.2f ms | draws %u | tris %u | entities %llu | gizmo %s | undo %u | redo %u | %s",
                 static_cast<double>(dt > 0.f ? 1.f / dt : 0.f), static_cast<double>(dt * 1000.f),
                 st.draw_calls, st.triangles,
                 static_cast<unsigned long long>(scene_->world().entity_count()), gizmo_name,
+                history_ ? history_->undo_depth() : 0u, history_ ? history_->redo_depth() : 0u,
                 playing_ ? "playing" : "paused");
     ImGui::End();
 }
@@ -1270,6 +1355,8 @@ void EditorApp::draw_viewport_gizmo(const Camera& camera, f32 aspect) {
                                    : gizmo_op_ == GizmoOp::Rotate ? ImGuizmo::ROTATE
                                    : ImGuizmo::SCALE;
     const ImGuizmo::MODE mode = gizmo_world_space_ ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
+    history_->begin("gizmo " + std::string(gizmo_op_ == GizmoOp::Translate ? "translate"
+                                          : gizmo_op_ == GizmoOp::Rotate ? "rotate" : "scale"));
     f32 snap = 0.f;
     const f32* snap_ptr = nullptr;
     if (gizmo_snap_) {
@@ -1350,6 +1437,10 @@ void EditorApp::main_loop() {
         const f32 aspect = fb.height > 0 ? static_cast<f32>(fb.width) / static_cast<f32>(fb.height) : 1.f;
         draw_viewport_gizmo(camera, aspect);
         draw_viewport_overlay(camera, camEntity);
+
+        // Close the open edit transaction once no widget/gizmo is being
+        // dragged anymore; coalescing made the whole drag one entry.
+        if (history_ && !ImGui::IsAnyItemActive() && !ImGuizmo::IsUsing()) history_->commit();
 
         ImGui::Render();
 
