@@ -17,7 +17,9 @@
 #include "ignis/renderer/vulkan_renderer.h"
 #include "ignis/window/window.h"
 #include <vulkan/vulkan.h>
+#ifndef GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_NONE
+#endif
 #include <GLFW/glfw3.h>
 #include <cstdio>
 #include <cstdlib>
