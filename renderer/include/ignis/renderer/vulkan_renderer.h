@@ -83,7 +83,14 @@ public:
 
     // CSM: how many shadow cascades to render (clamped to 1..4). 1 disables
     // cascading and uses a single shadow map (fallback / perf toggle).
+    // Safe to call before init(): cached and applied at initialization.
     void set_shadow_cascade_count(u32 count);
+
+    // Bloom post-processing: enable/disable and tune strength (HDR, pre-tonemap),
+    // luminance threshold and soft-knee width. Defaults: on, strength 0.6,
+    // threshold 1.0, knee 0.5. Safe to call before init(): settings are cached
+    // and applied when the renderer is initialized.
+    void set_bloom(bool enabled, f32 strength = 0.6f, f32 threshold = 1.0f, f32 knee = 0.5f);
 
 private:
     struct Impl;
@@ -96,6 +103,13 @@ private:
     u32 pending_width_ = 0;
     u32 pending_height_ = 0;
     bool frame_rendered_ = false;
+    // Feature settings cached on the outer object so setters work before
+    // init(); copied into Impl when it is created (and forwarded live after).
+    u32 shadow_cascade_count_ = 4;
+    bool bloom_enabled_ = true;
+    f32 bloom_strength_ = 0.6f;
+    f32 bloom_threshold_ = 1.0f;
+    f32 bloom_knee_ = 0.5f;
 };
 
 } // namespace ignis

@@ -57,7 +57,8 @@ We're building a production-grade, simple and straight-forward 3D Game Engine fo
   search + penumbra-scaled PCF); 1-cascade fallback via
   `set_shadow_cascade_count(1)`
 - Good SSAO
-- HDR pipeline with tonemapping
+- HDR pipeline with bloom (multi-level mip chain, composited pre-tonemap) and
+  ACES tonemapping; `VulkanRenderer::set_bloom()` tunes it
 
 ## 3D Physics
 - Use simple 3D physics library of your choosing
