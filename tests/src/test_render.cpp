@@ -324,8 +324,8 @@ TEST(Render, BloomAddsHalo) {
         camera.position = {0.f, 0.f, 3.f};
         camera.fov_y_deg = 60.f;
         VulkanRenderer renderer;
-        renderer.set_bloom(bloom, 0.8f, 1.0f);
         if (!renderer.init_offscreen(64, 64).ok()) return std::vector<u8>{};
+        renderer.set_bloom(bloom, 0.8f, 1.0f, 0.5f); // after init: impl exists
         renderer.render(scene, camera, 1.f / 60.f);
         auto rb = renderer.readback();
         renderer.shutdown();

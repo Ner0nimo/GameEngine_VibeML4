@@ -32,14 +32,17 @@ vec3 aces(vec3 x) {
 
 void main() {
     vec3 hdr = texture(sampler2D(tex_hdr, samp_hdr), v_uv).rgb;
-    // Bloom is composited in HDR, before tonemapping.
-    const float w[5] = float[](0.4, 0.25, 0.15, 0.12, 0.08);
-    vec3 bloom = w[0] * texture(sampler2D(tex_bloom0, samp_bloom0), v_uv).rgb
-               + w[1] * texture(sampler2D(tex_bloom1, samp_bloom1), v_uv).rgb
-               + w[2] * texture(sampler2D(tex_bloom2, samp_bloom2), v_uv).rgb
-               + w[3] * texture(sampler2D(tex_bloom3, samp_bloom3), v_uv).rgb
-               + w[4] * texture(sampler2D(tex_bloom4, samp_bloom4), v_uv).rgb;
-    hdr += ubo.bloomStrength * bloom;
+    // Bloom is composited in HDR, before tonemapping. Guard on bloomStrength so
+    // a disabled bloom never samples the (then unwritten) bloom targets.
+    if (ubo.bloomStrength > 0.0) {
+        const float w[5] = float[](0.4, 0.25, 0.15, 0.12, 0.08);
+        vec3 bloom = w[0] * texture(sampler2D(tex_bloom0, samp_bloom0), v_uv).rgb
+                   + w[1] * texture(sampler2D(tex_bloom1, samp_bloom1), v_uv).rgb
+                   + w[2] * texture(sampler2D(tex_bloom2, samp_bloom2), v_uv).rgb
+                   + w[3] * texture(sampler2D(tex_bloom3, samp_bloom3), v_uv).rgb
+                   + w[4] * texture(sampler2D(tex_bloom4, samp_bloom4), v_uv).rgb;
+        hdr += ubo.bloomStrength * bloom;
+    }
     vec3 mapped = aces(hdr * ubo.exposure);
     // gamma correct (linear -> sRGB)
     vec3 gamma = pow(mapped, vec3(1.0 / 2.2));

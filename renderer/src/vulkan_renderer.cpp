@@ -490,7 +490,7 @@ struct VulkanRenderer::Impl {
 
     BufferHandle cbLight, cbSSAO, cbBlur, cbTonemap, cbBloom, cbDummy;
     BindingSetHandle setSSAO, setBlur, setLightingTex, setLightingUBO, setTonemap, setBloomBright;
-    std::array<BindingSetHandle, kBloomLevels> setBloomDown;
+    std::array<BindingSetHandle, kBloomLevels - 1> setBloomDown; // [i-1] = source of downsample level i
     // Post settings (set via VulkanRenderer::set_bloom).
     bool bloomEnabled = true;
     f32 bloomStrength = 0.6f;
@@ -675,10 +675,11 @@ struct VulkanRenderer::Impl {
         fbl.addColorAttachment(texHDR);
         fbLighting = dev->createFramebuffer(fbl);
 
-        // Bloom mip chain (level 0 = bright pass at half res, then downsamples).
+        // Bloom mip chain: level i is at (w >> (i+1)) — level 0 is the bright
+        // pass at half res, deeper levels downsample further.
         for (u32 i = 0; i < kBloomLevels; ++i) {
-            const u32 bw = std::max(w >> i, 1u);
-            const u32 bh = std::max(h >> i, 1u);
+            const u32 bw = std::max(w >> (i + 1), 1u);
+            const u32 bh = std::max(h >> (i + 1), 1u);
             texBloom[i] = createTex2D(bw, bh, Format::RGBA16_FLOAT, true, "bloom");
             FramebufferDesc fb;
             fb.addColorAttachment(texBloom[i]);
@@ -965,11 +966,10 @@ struct VulkanRenderer::Impl {
             BindingSetItem::Texture_SRV(0, texHDR), BindingSetItem::Sampler(0, sampLinear),
             BindingSetItem::ConstantBuffer(1, cbBloom),
         });
-        for (u32 i = 0; i < kBloomLevels; ++i) {
-            // Downsample level i reads level i-1 (level 0's source is the bright pass).
-            const TextureHandle src = i == 0 ? texHDR : texBloom[i - 1];
-            setBloomDown[i] = makeSet(layoutBloomBlur, {
-                BindingSetItem::Texture_SRV(0, src), BindingSetItem::Sampler(0, sampLinear),
+        for (u32 i = 1; i < kBloomLevels; ++i) {
+            // Downsample level i reads level i-1.
+            setBloomDown[i - 1] = makeSet(layoutBloomBlur, {
+                BindingSetItem::Texture_SRV(0, texBloom[i - 1]), BindingSetItem::Sampler(0, sampLinear),
                 BindingSetItem::ConstantBuffer(1, cbBlur),
             });
         }
@@ -1079,6 +1079,12 @@ VulkanRenderer::~VulkanRenderer() {
 Result<void> VulkanRenderer::init(Window* window) {
     const bool wasOffscreen = impl_ && impl_->offscreen; // init_offscreen sets this first
     impl_ = std::make_unique<Impl>();
+    // Apply settings cached via setters before init().
+    impl_->shadowCascadeCount = shadow_cascade_count_;
+    impl_->bloomEnabled = bloom_enabled_;
+    impl_->bloomStrength = bloom_strength_;
+    impl_->bloomThreshold = bloom_threshold_;
+    impl_->bloomKnee = bloom_knee_;
     auto& I = *impl_;
     I.offscreen = wasOffscreen;
     I.window = window;
@@ -1319,14 +1325,21 @@ void VulkanRenderer::set_debug_lines(const std::vector<DebugLine>& lines) {
 }
 
 void VulkanRenderer::set_shadow_cascade_count(u32 count) {
-    if (impl_) impl_->shadowCascadeCount = std::clamp(count, 1u, kCascadeCount);
+    shadow_cascade_count_ = std::clamp(count, 1u, kCascadeCount);
+    if (impl_) impl_->shadowCascadeCount = shadow_cascade_count_;
 }
 
-void VulkanRenderer::set_bloom(bool enabled, f32 strength, f32 threshold) {
-    if (!impl_) return;
-    impl_->bloomEnabled = enabled;
-    impl_->bloomStrength = glm::clamp(strength, 0.f, 2.f);
-    impl_->bloomThreshold = glm::clamp(threshold, 0.f, 10.f);
+void VulkanRenderer::set_bloom(bool enabled, f32 strength, f32 threshold, f32 knee) {
+    bloom_enabled_ = enabled;
+    bloom_strength_ = glm::clamp(strength, 0.f, 2.f);
+    bloom_threshold_ = glm::clamp(threshold, 0.f, 10.f);
+    bloom_knee_ = glm::clamp(knee, 0.f, 1.f);
+    if (impl_) {
+        impl_->bloomEnabled = bloom_enabled_;
+        impl_->bloomStrength = bloom_strength_;
+        impl_->bloomThreshold = bloom_threshold_;
+        impl_->bloomKnee = bloom_knee_;
+    }
 }
 
 void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
@@ -1716,16 +1729,16 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
             gs.setFramebuffer(I.fbBloom[0]);
             gs.addBindingSet(I.setBloomBright);
             ViewportState vs;
-            vs.addViewportAndScissorRect(Viewport(static_cast<f32>(std::max(w >> 0, 1u)),
-                                                   static_cast<f32>(std::max(h >> 0, 1u))));
+            vs.addViewportAndScissorRect(Viewport(static_cast<f32>(std::max(w >> 1, 1u)),
+                                                   static_cast<f32>(std::max(h >> 1, 1u))));
             gs.setViewport(vs);
             cl->setGraphicsState(gs);
             cl->draw(args);
         }
         // Levels 1..N-1: downsample+blur from the previous level.
         for (u32 i = 1; i < kBloomLevels; ++i) {
-            const u32 sw = std::max(w >> (i - 1), 1u);
-            const u32 sh = std::max(h >> (i - 1), 1u);
+            const u32 sw = std::max(w >> i, 1u);       // source = level i-1
+            const u32 sh = std::max(h >> i, 1u);
             BlurUBO bu{};
             bu.texelSize = math::Vec2(1.f / static_cast<f32>(sw), 1.f / static_cast<f32>(sh));
             bu.direction = math::Vec2(1.f, 0.f);
@@ -1733,10 +1746,10 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
             GraphicsState gs;
             gs.setPipeline(I.psoBloomBlur);
             gs.setFramebuffer(I.fbBloom[i]);
-            gs.addBindingSet(I.setBloomDown[i]);
+            gs.addBindingSet(I.setBloomDown[i - 1]);
             ViewportState vs;
-            vs.addViewportAndScissorRect(Viewport(static_cast<f32>(std::max(w >> i, 1u)),
-                                                   static_cast<f32>(std::max(h >> i, 1u))));
+            vs.addViewportAndScissorRect(Viewport(static_cast<f32>(std::max(w >> (i + 1), 1u)),
+                                                   static_cast<f32>(std::max(h >> (i + 1), 1u))));
             gs.setViewport(vs);
             cl->setGraphicsState(gs);
             cl->draw(args);

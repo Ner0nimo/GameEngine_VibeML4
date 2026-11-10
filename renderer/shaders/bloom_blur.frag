@@ -13,13 +13,16 @@ layout(set = 0, binding = 257) uniform UniformBuffer {
 } ubo;
 
 // Wide separable-style downsample kernel (center + axis/diagonal taps);
-// linear filtering does the actual downsampling.
+// linear filtering does the actual downsampling. Weights are normalized so
+// the tap-weight sum is 1 (energy-preserving across levels).
 void main() {
     const float w0 = 0.227027;
     const float w1 = 0.1945946;
     const float w2 = 0.1216216;
     const float w3 = 0.054054;
     const float w4 = 0.016216;
+    // 1 / (w0 + 4*w1 + 4*w2 + 6*w3 + 2*w4) = 1 / 1.8486478
+    const float norm = 0.5409106f;
     vec3 sum = texture(sampler2D(tex_src, samp_src), v_uv).rgb * w0;
     vec2 ts = ubo.texelSize * 1.5;
     sum += texture(sampler2D(tex_src, samp_src), v_uv + vec2(ts.x, 0.0)).rgb * w1;
@@ -38,5 +41,5 @@ void main() {
     sum += texture(sampler2D(tex_src, samp_src), v_uv - vec2(0.0, 2.0 * ts.y)).rgb * w3;
     sum += texture(sampler2D(tex_src, samp_src), v_uv + 3.0 * ts).rgb * w4;
     sum += texture(sampler2D(tex_src, samp_src), v_uv - 3.0 * ts).rgb * w4;
-    rt_out = vec4(sum, 1.0);
+    rt_out = vec4(sum * norm, 1.0);
 }
