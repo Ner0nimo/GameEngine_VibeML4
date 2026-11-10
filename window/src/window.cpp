@@ -17,12 +17,10 @@ Window::~Window() {
     shutdown();
 }
 
-bool Window::init(std::string& err) {
-    if (window_) return true;
-    if (!glfwInit()) {
-        err = "glfwInit failed (no display / missing X11 or Wayland)";
-        return false;
-    }
+Result<void> Window::init() {
+    if (window_) return Result<void>::success();
+    if (!glfwInit())
+        return Result<void>::failure("glfwInit failed (no display / missing X11 or Wayland)");
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, props_.resizable ? GLFW_TRUE : GLFW_FALSE);
     glfwWindowHint(GLFW_VISIBLE, props_.visible ? GLFW_TRUE : GLFW_FALSE);
@@ -30,9 +28,8 @@ bool Window::init(std::string& err) {
     window_ = glfwCreateWindow(static_cast<int>(props_.width), static_cast<int>(props_.height),
                                props_.title.c_str(), nullptr, nullptr);
     if (!window_) {
-        err = "glfwCreateWindow failed";
         glfwTerminate();
-        return false;
+        return Result<void>::failure("glfwCreateWindow failed");
     }
 
     glfwSetWindowUserPointer(window_, this);
@@ -45,7 +42,7 @@ bool Window::init(std::string& err) {
     time_ = glfwGetTime();
     last_time_ = time_;
     IGNIS_INFO("Window created: '{}' {}x{}", props_.title, props_.width, props_.height);
-    return true;
+    return Result<void>::success();
 }
 
 void Window::shutdown() {
@@ -71,23 +68,24 @@ void Window::request_close() {
     if (window_) glfwSetWindowShouldClose(window_, GLFW_TRUE);
 }
 
-void Window::framebuffer_size(u32& w, u32& h) const {
+FramebufferSize Window::framebuffer_size() const {
+    FramebufferSize out;
     int fw = 0, fh = 0;
     if (window_) glfwGetFramebufferSize(window_, &fw, &fh);
-    w = static_cast<u32>(fw);
-    h = static_cast<u32>(fh);
+    out.width = static_cast<u32>(fw);
+    out.height = static_cast<u32>(fh);
+    return out;
 }
 
 #if defined(IGNIS_WINDOW_VULKAN)
-void* Window::create_vulkan_surface(void* instance, std::string& err) {
+Result<void*> Window::create_vulkan_surface(void* instance) {
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkResult res = glfwCreateWindowSurface(static_cast<VkInstance>(instance), window_,
                                            nullptr, &surface);
-    if (res != VK_SUCCESS) {
-        err = "glfwCreateWindowSurface failed: " + std::to_string(static_cast<int>(res));
-        return nullptr;
-    }
-    return reinterpret_cast<void*>(surface);
+    if (res != VK_SUCCESS)
+        return Result<void*>::failure("glfwCreateWindowSurface failed: " +
+                                       std::to_string(static_cast<int>(res)));
+    return Result<void*>::success(reinterpret_cast<void*>(surface));
 }
 #endif
 

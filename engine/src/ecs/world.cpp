@@ -1,6 +1,5 @@
 #include "ignis/ecs/world.h"
 
-#include "ignis/core/log.h"
 #include "ignis/ecs/component_registry.h"
 
 namespace ignis {
@@ -75,14 +74,16 @@ void World::set_name(EntityId e, std::string name) {
     if (alive_.contains(e)) names_[e] = std::move(name);
 }
 
-void World::set_parent(EntityId child, EntityId parent) {
-    if (!alive_.contains(child)) return;
-    if (parent != NULL_ENTITY && !alive_.contains(parent)) {
-        IGNIS_WARN("set_parent: parent {} is not alive", parent);
-        parent = NULL_ENTITY;
+bool World::set_parent(EntityId child, EntityId parent) {
+    if (!alive_.contains(child)) return false;
+    if (parent != NULL_ENTITY && !alive_.contains(parent)) return false;
+    // Reject cycles: parent must not be the child itself or one of its
+    // descendants. The hierarchy stays acyclic by construction.
+    for (EntityId cur = parent; cur != NULL_ENTITY; cur = parent_of(cur)) {
+        if (cur == child) return false;
     }
     EntityId old = parent_of(child);
-    if (old == parent) return;
+    if (old == parent) return true;
     if (old != NULL_ENTITY) {
         auto& siblings = children_[old];
         for (auto it = siblings.begin(); it != siblings.end(); ++it) {
@@ -91,6 +92,7 @@ void World::set_parent(EntityId child, EntityId parent) {
     }
     parent_[child] = parent;
     if (parent != NULL_ENTITY) children_[parent].push_back(child);
+    return true;
 }
 
 EntityId World::parent_of(EntityId e) const noexcept {

@@ -1,5 +1,6 @@
 add_library(ignis_audio STATIC
     src/audio_engine.cpp
+    src/audio_system.cpp
 )
 add_library(ignis::audio ALIAS ignis_audio)
 

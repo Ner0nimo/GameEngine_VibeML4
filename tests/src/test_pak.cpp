@@ -21,20 +21,21 @@ TEST(Pak, WriteReadRoundtrip) {
     w.add_file("scene.json", {'{', '}', '\n'});
     w.add_file("assets/a.bin", std::vector<u8>(1000, 0xAB));
     w.add_file("scripts/x.lua", std::vector<u8>{'p', 'r', 'i', 'n', 't', '1'});
-    ASSERT_TRUE(w.write(path.string()));
+    ASSERT_TRUE(w.write(path.string()).ok());
 
     PakReader r;
-    ASSERT_TRUE(r.open(path.string()));
+    ASSERT_TRUE(r.open(path.string()).ok());
     EXPECT_TRUE(r.has("scene.json"));
     EXPECT_FALSE(r.has("nope"));
     EXPECT_EQ(r.list().size(), 3u);
 
-    std::vector<u8> out;
-    ASSERT_TRUE(r.read("scene.json", out));
-    EXPECT_EQ(std::string(out.begin(), out.end()), "{}\n");
-    ASSERT_TRUE(r.read("assets/a.bin", out));
-    EXPECT_EQ(out.size(), 1000u);
-    EXPECT_EQ(out[0], 0xAB);
+    auto out = r.read("scene.json");
+    ASSERT_TRUE(out.ok()) << out.error();
+    EXPECT_EQ(std::string(out.value().begin(), out.value().end()), "{}\n");
+    out = r.read("assets/a.bin");
+    ASSERT_TRUE(out.ok()) << out.error();
+    EXPECT_EQ(out.value().size(), 1000u);
+    EXPECT_EQ(out.value()[0], 0xAB);
 
     std::filesystem::remove(path);
 }
@@ -43,7 +44,7 @@ TEST(Pak, CorruptionDetected) {
     const auto path = std::filesystem::temp_directory_path() / "ignis_test_corrupt.ignispak";
     PakWriter w;
     w.add_file("data.bin", std::vector<u8>(64, 0x11));
-    ASSERT_TRUE(w.write(path.string()));
+    ASSERT_TRUE(w.write(path.string()).ok());
 
     // Flip a byte inside the blob region (after header+index: 8 + index size).
     {
@@ -56,8 +57,7 @@ TEST(Pak, CorruptionDetected) {
         f.write(&c, 1);
     }
     PakReader r;
-    ASSERT_TRUE(r.open(path.string()));
-    std::vector<u8> out;
-    EXPECT_FALSE(r.read("data.bin", out)); // sha256 mismatch must fail
+    ASSERT_TRUE(r.open(path.string()).ok());
+    EXPECT_FALSE(r.read("data.bin").ok()); // sha256 mismatch must fail
     std::filesystem::remove(path);
 }

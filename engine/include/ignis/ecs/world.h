@@ -74,7 +74,11 @@ public:
     void set_name(EntityId e, std::string name);
 
     // --- hierarchy --------------------------------------------------------
-    void set_parent(EntityId child, EntityId parent); // parent may be NULL_ENTITY
+    // Sets child's parent (NULL_ENTITY = root). Returns false and changes
+    // nothing if child/parent is not alive or if parent is child's own
+    // descendant (which would create a cycle) — the hierarchy invariant is
+    // "acyclic", enforced here at write time so readers never have to guard.
+    bool set_parent(EntityId child, EntityId parent);
     EntityId parent_of(EntityId e) const noexcept;
     const std::vector<EntityId>& children_of(EntityId e) const noexcept;
 

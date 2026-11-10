@@ -88,20 +88,21 @@ PhysicsSystem::~PhysicsSystem() {
     shutdown();
 }
 
-bool PhysicsSystem::init(math::Vec3 gravity, std::string* err) {
+Result<void> PhysicsSystem::init(math::Vec3 gravity) {
     shutdown();
     common_ = new rp3d::PhysicsCommon();
     rp3d::PhysicsWorld::WorldSettings settings;
     settings.gravity = to_rp3d(gravity);
     world_ = common_->createPhysicsWorld(settings);
     if (!world_) {
-        if (err) *err = "createPhysicsWorld failed";
-        return false;
+        delete common_;
+        common_ = nullptr;
+        return Result<void>::failure("createPhysicsWorld failed");
     }
     listener_ = new CollisionListener(*this);
     world_->setEventListener(listener_);
     active_ = this;
-    return true;
+    return Result<void>::success();
 }
 
 void PhysicsSystem::shutdown() {

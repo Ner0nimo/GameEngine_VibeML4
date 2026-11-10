@@ -36,9 +36,8 @@ struct VulkanRenderer::Impl {};
 
 VulkanRenderer::VulkanRenderer() = default;
 VulkanRenderer::~VulkanRenderer() = default;
-bool VulkanRenderer::init(Window*, std::string& err) {
-    err = "renderer requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
-    return false;
+Result<void> VulkanRenderer::init(Window*) {
+    return Result<void>::failure("renderer requires a graphics build (IGNIS_WITH_GRAPHICS=ON)");
 }
 void VulkanRenderer::shutdown() {}
 void VulkanRenderer::on_resize(u32, u32) {}
@@ -46,16 +45,16 @@ void VulkanRenderer::render(Scene&, const Camera&, f32) {}
 void VulkanRenderer::present() {}
 RawVulkanHandles VulkanRenderer::raw_handles() const { return {}; }
 void VulkanRenderer::set_debug_lines(const std::vector<DebugLine>& lines) { debug_lines_ = lines; }
-bool VulkanRenderer::init_offscreen(u32, u32, std::string& err) {
-    err = "renderer requires a graphics build";
-    return false;
+Result<void> VulkanRenderer::init_offscreen(u32, u32) {
+    return Result<void>::failure("renderer requires a graphics build");
 }
-bool VulkanRenderer::readback(std::vector<u8>&) { return false; }
+Result<std::vector<u8>> VulkanRenderer::readback() {
+    return Result<std::vector<u8>>::failure("renderer requires a graphics build");
+}
 u32 VulkanRenderer::offscreen_width() const { return 0; }
 u32 VulkanRenderer::offscreen_height() const { return 0; }
-bool VulkanRenderer::set_environment_hdr(const std::string&, std::string& err) {
-    err = "renderer requires a graphics build";
-    return false;
+Result<void> VulkanRenderer::set_environment_hdr(const std::string&) {
+    return Result<void>::failure("renderer requires a graphics build");
 }
 
 #else // IGNIS_RENDERER_VULKAN
@@ -135,7 +134,7 @@ math::Mat4 ortho_vk(f32 l, f32 r, f32 b, f32 t, f32 znear, f32 zfar) {
 
 // --- Raw Vulkan bootstrap -----------------------------------------------------
 
-bool create_instance(Window* window, VkInstance& out, std::string& err) {
+Result<void> create_instance(Window* window, VkInstance& out) {
     VkApplicationInfo app{};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app.pApplicationName = "Ignis";
@@ -145,10 +144,8 @@ bool create_instance(Window* window, VkInstance& out, std::string& err) {
     if (window) {
         u32 count = 0;
         const char** glfwExts = glfwGetRequiredInstanceExtensions(&count);
-        if (!glfwExts) {
-            err = "glfwGetRequiredInstanceExtensions failed (no display?)";
-            return false;
-        }
+        if (!glfwExts)
+            return Result<void>::failure("glfwGetRequiredInstanceExtensions failed (no display?)");
         for (u32 i = 0; i < count; ++i) exts.push_back(glfwExts[i]);
     }
 
@@ -158,21 +155,17 @@ bool create_instance(Window* window, VkInstance& out, std::string& err) {
     ci.enabledExtensionCount = static_cast<u32>(exts.size());
     ci.ppEnabledExtensionNames = exts.data();
 
-    if (vkCreateInstance(&ci, nullptr, &out) != VK_SUCCESS) {
-        err = "vkCreateInstance failed";
-        return false;
-    }
-    return true;
+    if (vkCreateInstance(&ci, nullptr, &out) != VK_SUCCESS)
+        return Result<void>::failure("vkCreateInstance failed");
+    return Result<void>::success();
 }
 
-bool pick_physical(VkInstance instance, Window* window, VkSurfaceKHR surface,
-                   VkPhysicalDevice& out, u32& queueFamily, std::string& err) {
+Result<void> pick_physical(VkInstance instance, Window* window, VkSurfaceKHR surface,
+                           VkPhysicalDevice& out, u32& queueFamily) {
     u32 count = 0;
     vkEnumeratePhysicalDevices(instance, &count, nullptr);
-    if (count == 0) {
-        err = "no Vulkan physical devices";
-        return false;
-    }
+    if (count == 0)
+        return Result<void>::failure("no Vulkan physical devices");
     std::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(instance, &count, devices.data());
 
@@ -192,16 +185,15 @@ bool pick_physical(VkInstance instance, Window* window, VkSurfaceKHR surface,
             if (graphics && present != VK_FALSE) {
                 out = dev;
                 queueFamily = i;
-                return true;
+                return Result<void>::success();
             }
         }
     }
-    err = "no suitable GPU (graphics queue) found";
-    return false;
+    return Result<void>::failure("no suitable GPU (graphics queue) found");
 }
 
-bool create_logical(VkPhysicalDevice phys, u32 queueFamily, bool windowed,
-                    VkDevice& out, VkQueue& outQueue, std::string& err) {
+Result<void> create_logical(VkPhysicalDevice phys, u32 queueFamily, bool windowed,
+                            VkDevice& out, VkQueue& outQueue) {
     const f32 priority = 1.f;
     VkDeviceQueueCreateInfo qci{};
     qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -230,17 +222,15 @@ bool create_logical(VkPhysicalDevice phys, u32 queueFamily, bool windowed,
     ci.pEnabledFeatures = &feats;
     ci.pNext = &timelineFeats;
 
-    if (vkCreateDevice(phys, &ci, nullptr, &out) != VK_SUCCESS) {
-        err = "vkCreateDevice failed";
-        return false;
-    }
+    if (vkCreateDevice(phys, &ci, nullptr, &out) != VK_SUCCESS)
+        return Result<void>::failure("vkCreateDevice failed");
     vkGetDeviceQueue(out, queueFamily, 0, &outQueue);
-    return true;
+    return Result<void>::success();
 }
 
-bool create_swapchain(VkPhysicalDevice phys, VkDevice device, VkSurfaceKHR surface,
-                      Window* window, VkSwapchainKHR& out, VkFormat& outFormat,
-                      VkExtent2D& outExtent, std::vector<VkImage>& outImages, std::string& err) {
+Result<void> create_swapchain(VkPhysicalDevice phys, VkDevice device, VkSurfaceKHR surface,
+                              Window* window, VkSwapchainKHR& out, VkFormat& outFormat,
+                              VkExtent2D& outExtent, std::vector<VkImage>& outImages) {
     VkSurfaceCapabilitiesKHR caps{};
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phys, surface, &caps);
 
@@ -258,10 +248,9 @@ bool create_swapchain(VkPhysicalDevice phys, VkDevice device, VkSurfaceKHR surfa
 
     VkExtent2D extent = caps.currentExtent;
     if (extent.width == UINT32_MAX) {
-        u32 w = 0, h = 0;
-        window->framebuffer_size(w, h);
-        extent.width = std::clamp(w, caps.minImageExtent.width, caps.maxImageExtent.width);
-        extent.height = std::clamp(h, caps.minImageExtent.height, caps.maxImageExtent.height);
+        const FramebufferSize fb = window->framebuffer_size();
+        extent.width = std::clamp(fb.width, caps.minImageExtent.width, caps.maxImageExtent.width);
+        extent.height = std::clamp(fb.height, caps.minImageExtent.height, caps.maxImageExtent.height);
     }
 
     u32 imageCount = caps.minImageCount + 1;
@@ -282,10 +271,8 @@ bool create_swapchain(VkPhysicalDevice phys, VkDevice device, VkSurfaceKHR surfa
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     ci.clipped = VK_TRUE;
 
-    if (vkCreateSwapchainKHR(device, &ci, nullptr, &out) != VK_SUCCESS) {
-        err = "vkCreateSwapchainKHR failed";
-        return false;
-    }
+    if (vkCreateSwapchainKHR(device, &ci, nullptr, &out) != VK_SUCCESS)
+        return Result<void>::failure("vkCreateSwapchainKHR failed");
     outFormat = chosen.format;
     outExtent = extent;
 
@@ -293,7 +280,7 @@ bool create_swapchain(VkPhysicalDevice phys, VkDevice device, VkSurfaceKHR surfa
     vkGetSwapchainImagesKHR(device, out, &n, nullptr);
     outImages.resize(n);
     vkGetSwapchainImagesKHR(device, out, &n, outImages.data());
-    return true;
+    return Result<void>::success();
 }
 
 } // namespace
@@ -837,7 +824,7 @@ VulkanRenderer::~VulkanRenderer() {
     shutdown();
 }
 
-bool VulkanRenderer::init(Window* window, std::string& err) {
+Result<void> VulkanRenderer::init(Window* window) {
     const bool wasOffscreen = impl_ && impl_->offscreen; // init_offscreen sets this first
     impl_ = std::make_unique<Impl>();
     auto& I = *impl_;
@@ -845,27 +832,31 @@ bool VulkanRenderer::init(Window* window, std::string& err) {
     I.window = window;
     I.assets = assets_;
 
-    if (!create_instance(window, I.instance, err)) return false;
+    if (auto r = create_instance(window, I.instance); !r.ok()) return r;
 
     // Surface for windowed mode.
     if (window) {
-        void* surf = window->create_vulkan_surface(reinterpret_cast<void*>(I.instance), err);
-        if (!surf) return false;
-        I.surface = reinterpret_cast<VkSurfaceKHR>(surf);
+        auto surf = window->create_vulkan_surface(reinterpret_cast<void*>(I.instance));
+        if (!surf.ok()) return Result<void>::failure(surf.error());
+        I.surface = reinterpret_cast<VkSurfaceKHR>(surf.value());
     }
 
-    if (!pick_physical(I.instance, window, I.surface, I.physical, I.queueFamily, err)) return false;
-    if (!create_logical(I.physical, I.queueFamily, window != nullptr, I.device, I.queue, err)) return false;
+    if (auto r = pick_physical(I.instance, window, I.surface, I.physical, I.queueFamily); !r.ok()) return r;
+    if (auto r = create_logical(I.physical, I.queueFamily, window != nullptr, I.device, I.queue); !r.ok()) return r;
 
     // NVRHI is built as a shared library here, so it initializes the Vulkan-Hpp
     // dispatcher itself inside nvrhi::vulkan::createDevice - nothing to do.
 
     u32 w = 1280, h = 720;
-    if (window) window->framebuffer_size(w, h);
     if (window) {
-        if (!create_swapchain(I.physical, I.device, I.surface, window, I.swapchain, I.swapFormat,
-                              I.swapExtent, I.swapImages, err)) {
-            return false;
+        const FramebufferSize fb = window->framebuffer_size();
+        w = fb.width;
+        h = fb.height;
+    }
+    if (window) {
+        if (auto r = create_swapchain(I.physical, I.device, I.surface, window, I.swapchain,
+                                      I.swapFormat, I.swapExtent, I.swapImages); !r.ok()) {
+            return r;
         }
         w = I.swapExtent.width;
         h = I.swapExtent.height;
@@ -886,10 +877,8 @@ bool VulkanRenderer::init(Window* window, std::string& err) {
     desc.graphicsQueue = I.queue;
     desc.graphicsQueueIndex = static_cast<int>(I.queueFamily);
     I.dev = nvrhi::vulkan::createDevice(desc);
-    if (!I.dev) {
-        err = "nvrhi::vulkan::createDevice failed";
-        return false;
-    }
+    if (!I.dev)
+        return Result<void>::failure("nvrhi::vulkan::createDevice failed");
 
     I.createTargets(w, h);
 
@@ -936,19 +925,19 @@ bool VulkanRenderer::init(Window* window, std::string& err) {
     vkCreateFence(I.device, &fci, nullptr, &I.inFlight);
 
     IGNIS_INFO("VulkanRenderer initialized ({}x{}, {})", w, h, window ? "windowed" : "offscreen");
-    return true;
+    return Result<void>::success();
 }
 
-bool VulkanRenderer::init_offscreen(u32 w, u32 h, std::string& err) {
+Result<void> VulkanRenderer::init_offscreen(u32 w, u32 h) {
     impl_ = std::make_unique<Impl>();
     impl_->offscreen = true;
     impl_->assets = assets_;
-    if (!init(nullptr, err)) return false;
+    if (auto r = init(nullptr); !r.ok()) return r;
     // Re-create targets at the requested offscreen size.
     impl_->dev->waitForIdle();
     impl_->createTargets(w, h);
     impl_->updateLightingSets();
-    return true;
+    return Result<void>::success();
 }
 
 void VulkanRenderer::shutdown() {
@@ -984,18 +973,14 @@ void VulkanRenderer::on_resize(u32 w, u32 h) {
     }
 }
 
-bool VulkanRenderer::set_environment_hdr(const std::string& path, std::string& err) {
-    if (!impl_ || !impl_->dev) {
-        err = "renderer not initialized";
-        return false;
-    }
+Result<void> VulkanRenderer::set_environment_hdr(const std::string& path) {
+    if (!impl_ || !impl_->dev)
+        return Result<void>::failure("renderer not initialized");
     auto& I = *impl_;
     AssetManager& am = I.assets ? *I.assets : I.ownAssets;
     auto hdr = am.load_texture(path);
-    if (!hdr || !hdr->hdr) {
-        err = "cannot load HDR equirect '" + path + "'";
-        return false;
-    }
+    if (!hdr || !hdr->hdr)
+        return Result<void>::failure("cannot load HDR equirect '" + path + "'");
     const Cubemap cube = equirect_to_irradiance(*hdr, 32, 64);
     TextureDesc d;
     d.width = 32;
@@ -1017,14 +1002,15 @@ bool VulkanRenderer::set_environment_hdr(const std::string& path, std::string& e
     });
     I.updateLightingSets();
     IGNIS_INFO("IBL environment set from {}", path);
-    return true;
+    return Result<void>::success();
 }
 
 u32 VulkanRenderer::offscreen_width() const { return impl_ ? impl_->width : 0; }
 u32 VulkanRenderer::offscreen_height() const { return impl_ ? impl_->height : 0; }
 
-bool VulkanRenderer::readback(std::vector<u8>& out) {
-    if (!impl_ || !impl_->dev || !impl_->texFinal) return false;
+Result<std::vector<u8>> VulkanRenderer::readback() {
+    if (!impl_ || !impl_->dev || !impl_->texFinal)
+        return Result<std::vector<u8>>::failure("renderer not initialized or nothing rendered");
     auto& I = *impl_;
     TextureDesc d;
     d.width = I.width;
@@ -1040,15 +1026,16 @@ bool VulkanRenderer::readback(std::vector<u8>& out) {
     });
     size_t rowPitch = 0;
     void* data = I.dev->mapStagingTexture(staging, TextureSlice(), CpuAccessMode::Read, &rowPitch);
-    if (!data) return false;
-    out.resize(static_cast<size_t>(I.width) * I.height * 4);
+    if (!data)
+        return Result<std::vector<u8>>::failure("mapStagingTexture failed");
+    std::vector<u8> out(static_cast<size_t>(I.width) * I.height * 4);
     for (u32 y = 0; y < I.height; ++y) {
         std::memcpy(out.data() + static_cast<size_t>(y) * I.width * 4,
                     static_cast<const u8*>(data) + static_cast<size_t>(y) * rowPitch,
                     static_cast<size_t>(I.width) * 4);
     }
     I.dev->unmapStagingTexture(staging);
-    return true;
+    return Result<std::vector<u8>>::success(std::move(out));
 }
 
 void VulkanRenderer::set_debug_lines(const std::vector<DebugLine>& lines) {

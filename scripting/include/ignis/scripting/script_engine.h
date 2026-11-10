@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ignis/core/result.h"
 #include "ignis/core/types.h"
 #include "ignis/ecs/entity.h"
 
@@ -29,7 +30,7 @@ public:
     ScriptEngine(const ScriptEngine&) = delete;
     ScriptEngine& operator=(const ScriptEngine&) = delete;
 
-    bool init(Scene* scene, AssetManager* assets, std::string& err);
+    Result<void> init(Scene* scene, AssetManager* assets);
     void shutdown();
 
     lua_State* state() noexcept { return L_; }
@@ -43,8 +44,12 @@ public:
     f32 delta_time() const noexcept { return dt_; }
 
 private:
-    bool ensure_env(EntityId e, std::string& err);
-    bool load_chunk(const std::string& path, int& registry_ref, std::string& err);
+    Result<void> ensure_env(EntityId e);
+    Result<int> load_chunk(const std::string& path);
+    // Call env[name](self[, dt]) if it is a function; logs and swallows runtime
+    // errors here (top of the script-call boundary) so one bad script cannot
+    // take down the frame loop.
+    void run_callback(int env_ref, const char* name, bool pass_dt, f32 dt);
 
     lua_State* L_ = nullptr;
     Scene* scene_ = nullptr;

@@ -35,7 +35,7 @@ cmake --preset full && cmake --build --preset full
 | `engine/` | `ignis_core` static lib: ECS, scene, assets, pak, agent commands |
 | `scripting/` | Lua 5.4 bindings (`ignis.*` API for entities/scene/prefabs) |
 | `physics/` | reactphysics3d: RigidBody/Collider, raycast, collisions |
-| `audio/` | miniaudio playback + decoding, null-device headless mode |
+| `audio/` | miniaudio playback + decoding, null-device headless mode, `AudioSource` component + `AudioSystem` (spatial 3D audio, pak-aware playback) |
 | `window/` `renderer/` | GLFW window, NVRHI/Vulkan renderer (PBR, shadows, SSAO, IBL, HDR tonemap) |
 | `runtime/` `editor/` | game runtime (headless-capable) and editor executables |
 | `tools/exporter/` | `ignis_export` CLI: packs a game into `game.ignispak` |
@@ -54,7 +54,8 @@ Scenes are JSON (see `scenes/test_scene.scene.json`): entities with `id`,
 function on_create(self) ... end        -- self.entity is the EntityId
 function on_update(self, dt) ... end
 function on_destroy(self) ... end
--- API: ignis.entity.*, ignis.scene.*, ignis.physics.raycast, ignis.audio.play, ...
+-- API: ignis.entity.*, ignis.scene.*, ignis.physics.raycast, ignis.audio.play,
+--      ignis.audio.play_source/stop_source/source_playing/set_listener, ...
 ```
 
 ## Agent control

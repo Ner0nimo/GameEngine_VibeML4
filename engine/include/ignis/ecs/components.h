@@ -25,17 +25,15 @@ struct TransformComponent {
     }
 };
 
-// World-space transform, computed by walking the parent chain.
+// World-space transform, computed by walking the parent chain. The hierarchy
+// is acyclic by construction (World::set_parent rejects cycles), so the walk
+// always terminates at the root.
 inline math::Mat4 world_matrix(const World& world, EntityId e) {
     math::Mat4 m(1.f);
-    EntityId cur = e;
-    // Guard against cycles (should never happen, but a corrupt scene file
-    // must not hang the engine).
-    for (int guard = 0; guard < 1024 && cur != NULL_ENTITY; ++guard) {
+    for (EntityId cur = e; cur != NULL_ENTITY; cur = world.parent_of(cur)) {
         if (const auto* t = world.get<TransformComponent>(cur)) {
             m = t->local_matrix() * m;
         }
-        cur = world.parent_of(cur);
     }
     return m;
 }

@@ -45,7 +45,7 @@ public:
     VulkanRenderer(); // defined in the .cpp (Impl is incomplete here)
     ~VulkanRenderer() override;
 
-    bool init(Window* window, std::string& err) override;
+    Result<void> init(Window* window) override;
     void shutdown() override;
     void on_resize(u32 width, u32 height) override;
     // Records and submits the frame (waits for completion). Windowed mode does
@@ -58,9 +58,9 @@ public:
     RenderStats stats() const override { return stats_; }
 
     // Offscreen mode (no window). Used by tests / headless GPU rendering.
-    bool init_offscreen(u32 width, u32 height, std::string& err);
+    Result<void> init_offscreen(u32 width, u32 height);
     // Read back the last rendered frame as RGBA8 (width*height*4 bytes).
-    bool readback(std::vector<u8>& out_rgba);
+    Result<std::vector<u8>> readback();
     u32 offscreen_width() const;
     u32 offscreen_height() const;
 
@@ -69,7 +69,7 @@ public:
     void set_asset_manager(AssetManager* am) { assets_ = am; }
 
     // IBL: load a polyhaven-style .hdr equirect and build the irradiance cubemap.
-    bool set_environment_hdr(const std::string& path, std::string& err);
+    Result<void> set_environment_hdr(const std::string& path);
 
 private:
     struct Impl;

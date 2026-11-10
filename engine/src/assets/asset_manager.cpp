@@ -14,24 +14,25 @@ namespace ignis {
 std::shared_ptr<Texture> decode_texture_memory(
     const std::string& name, const std::vector<u8>& bytes, bool force_hdr);
 
-bool AssetManager::read_file(const std::string& path, std::vector<u8>& out_bytes) {
+Result<std::vector<u8>> AssetManager::read_file(const std::string& path) {
     if (pak_) {
-        if (pak_->read(path, out_bytes)) return true;
+        auto from_pak = pak_->read(path);
+        if (from_pak.ok()) return from_pak;
     }
     std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
+    if (!f) return Result<std::vector<u8>>::failure("cannot open '" + path + "'");
     std::ostringstream ss;
     ss << f.rdbuf();
     const std::string s = ss.str();
-    out_bytes.assign(s.begin(), s.end());
-    return true;
+    return Result<std::vector<u8>>::success(
+        std::vector<u8>(s.begin(), s.end()));
 }
 
-bool AssetManager::read_text(const std::string& path, std::string& out_text) {
-    std::vector<u8> bytes;
-    if (!read_file(path, bytes)) return false;
-    out_text.assign(bytes.begin(), bytes.end());
-    return true;
+Result<std::string> AssetManager::read_text(const std::string& path) {
+    auto bytes = read_file(path);
+    if (!bytes.ok()) return Result<std::string>::failure(bytes.error());
+    const auto& b = bytes.value();
+    return Result<std::string>::success(std::string(b.begin(), b.end()));
 }
 
 std::shared_ptr<Texture> decode_texture_memory(

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ignis/core/result.h"
 #include "ignis/core/types.h"
 #include "ignis/ecs/entity.h"
 #include "ignis/ecs/world.h"
@@ -50,11 +51,13 @@ public:
     // --- serialization ----------------------------------------------------
     nlohmann::json serialize() const;
     static Scene deserialize(const nlohmann::json& j);
-    bool save_to_file(const std::string& path) const;
-    static Scene load_from_file(const std::string& path, bool& ok);
-    // Load a scene file INTO this scene (components must be registered on
-    // this world beforehand, e.g. register_builtin_components + physics).
-    bool load_file(const std::string& path);
+    Result<void> save_to_file(const std::string& path) const;
+    static Result<Scene> load_from_file(const std::string& path);
+    // Load a scene file INTO this scene: replaces this scene's world contents,
+    // prefabs and name, but keeps systems added via add_system. Components
+    // must be registered beforehand (e.g. register_builtin_components +
+    // physics/audio), since the registry is process-global.
+    Result<void> load_file(const std::string& path);
 
 private:
     World world_;

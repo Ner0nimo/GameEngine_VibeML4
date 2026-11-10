@@ -38,6 +38,19 @@ function on_update(self, dt)
         local id = ignis.audio.play("assets/test.wav", 0.5, false)
         ignis.log(2, "audio play id=" .. id)
     end
+
+    -- AudioSource component control: SoundEmitter is entity 7 with
+    -- play_on_start=true, so it is already playing at frame 120.
+    if f == 120 then
+        mover_src_playing = ignis.audio.source_playing(7)
+        ignis.audio.stop_source(7)
+        mover_src_stopped = not ignis.audio.source_playing(7)
+    end
+
+    if f == 150 then
+        ignis.audio.play_source(7)
+        mover_src_restarted = ignis.audio.source_playing(7)
+    end
 end
 
 function on_destroy(self)

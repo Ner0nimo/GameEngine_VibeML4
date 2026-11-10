@@ -61,12 +61,11 @@ bool gpu_render_works() {
         camera.position = {0.f, 0.f, 3.f};
         camera.fov_y_deg = 60.f;
         VulkanRenderer renderer;
-        std::string err;
-        if (!renderer.init_offscreen(64, 64, err)) _exit(2);
+        if (!renderer.init_offscreen(64, 64).ok()) _exit(2);
         renderer.render(scene, camera, 1.f / 60.f);
-        std::vector<u8> px;
-        if (!renderer.readback(px)) _exit(3);
-        if (px.size() != 64u * 64u * 4u) _exit(4);
+        auto px = renderer.readback();
+        if (!px.ok()) _exit(3);
+        if (px.value().size() != 64u * 64u * 4u) _exit(4);
         renderer.shutdown();
         _exit(0);
     }
@@ -81,10 +80,11 @@ bool render_cube(std::vector<u8>& px) {
     camera.position = {0.f, 0.f, 3.f};
     camera.fov_y_deg = 60.f;
     VulkanRenderer renderer;
-    std::string err;
-    if (!renderer.init_offscreen(64, 64, err)) return false;
+    if (!renderer.init_offscreen(64, 64).ok()) return false;
     renderer.render(scene, camera, 1.f / 60.f);
-    const bool ok = renderer.readback(px);
+    auto rb = renderer.readback();
+    const bool ok = rb.ok();
+    if (ok) px = std::move(rb.value());
     renderer.shutdown();
     return ok;
 }
@@ -220,12 +220,12 @@ TEST(Render, DebugLinesDrawn) {
     camera.position = {0.f, 0.f, 3.f};
 
     VulkanRenderer renderer;
-    std::string err;
-    ASSERT_TRUE(renderer.init_offscreen(64, 64, err)) << err;
+    ASSERT_TRUE(renderer.init_offscreen(64, 64).ok());
     renderer.set_debug_lines({{{-1.f, 0.f, 0.f}, {1.f, 0.f, 0.f}, {1.f, 1.f, 0.f, 1.f}}});
     renderer.render(scene, camera, 1.f / 60.f);
-    std::vector<u8> px;
-    ASSERT_TRUE(renderer.readback(px));
+    auto pxr = renderer.readback();
+    ASSERT_TRUE(pxr.ok()) << pxr.error();
+    const std::vector<u8>& px = pxr.value();
     bool found = false;
     for (u32 y = 30; y <= 34 && !found; ++y) {
         for (u32 x = 8; x < 56 && !found; ++x) {
@@ -245,7 +245,7 @@ TEST(Render, TestSceneOffscreenRenders) {
     Scene scene;
     register_builtin_components(scene.world());
     PhysicsSystem::register_components(scene.world());
-    ASSERT_TRUE(scene.load_file(std::string(IGNIS_SCENES_DIR) + "/test_scene.scene.json"));
+    ASSERT_TRUE(scene.load_file(std::string(IGNIS_SCENES_DIR) + "/test_scene.scene.json").ok());
 
     Camera camera;
     bool haveCam = false;
@@ -264,11 +264,11 @@ TEST(Render, TestSceneOffscreenRenders) {
     ASSERT_TRUE(haveCam) << "test scene must have an active camera";
 
     VulkanRenderer renderer;
-    std::string err;
-    ASSERT_TRUE(renderer.init_offscreen(128, 128, err)) << err;
+    ASSERT_TRUE(renderer.init_offscreen(128, 128).ok());
     renderer.render(scene, camera, 1.f / 60.f);
-    std::vector<u8> px;
-    ASSERT_TRUE(renderer.readback(px));
+    auto pxr = renderer.readback();
+    ASSERT_TRUE(pxr.ok()) << pxr.error();
+    const std::vector<u8>& px = pxr.value();
     ASSERT_EQ(px.size(), 128u * 128u * 4u);
 
     // Sky = clear color (0.05, 0.08, 0.16) -> roughly (61, 77, 112) after

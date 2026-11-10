@@ -59,6 +59,16 @@
         "Transform": { "position": [0, 10, 0], "rotation": [1, 0, 0, 0], "scale": [1, 1, 1] },
         "DirectionalLight": { "direction": [0.3, -1, 0.2], "color": [1, 1, 1], "intensity": 3, "cast_shadow": true }
       }
+    },
+    {
+      "id": 7,
+      "name": "SoundEmitter",
+      "parent": 0,
+      "components": {
+        "Transform": { "position": [2, 1, 0], "rotation": [1, 0, 0, 0], "scale": [1, 1, 1] },
+        "AudioSource": { "path": "assets/test.wav", "volume": 0.8, "pitch": 1, "loop": true,
+                         "play_on_start": true, "spatial": true, "min_distance": 1, "max_distance": 30 }
+      }
     }
   ],
   "prefabs": {

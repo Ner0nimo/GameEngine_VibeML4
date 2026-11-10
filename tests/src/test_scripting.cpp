@@ -51,8 +51,7 @@ TEST(Scripting, EntityLifecycleAndComponents) {
     register_builtin_components(scene.world());
     AssetManager assets;
     ScriptEngine scripts;
-    std::string err;
-    ASSERT_TRUE(scripts.init(&scene, &assets, err)) << err;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
 
     const std::string script_path = write_script("ignis_mover_test.lua", kMoverScript);
     EntityId e = scene.world().create_entity("scripted");
@@ -88,8 +87,7 @@ TEST(Scripting, PrefabSpawnFromLua) {
     scene.add_prefab("P", {{"name", "P"}, {"components", {{"Transform", {{"position", {4, 4, 4}}}}}}});
     AssetManager assets;
     ScriptEngine scripts;
-    std::string err;
-    ASSERT_TRUE(scripts.init(&scene, &assets, err));
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
 
     const std::string path = write_script("ignis_prefab_test.lua", R"LUA(
 function on_update(self, dt)
@@ -119,8 +117,7 @@ TEST(Scripting, BadScriptReportsError) {
     register_builtin_components(scene.world());
     AssetManager assets;
     ScriptEngine scripts;
-    std::string err;
-    ASSERT_TRUE(scripts.init(&scene, &assets, err));
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
     const std::string path = write_script("ignis_bad_test.lua", "this is not lua {{{");
     EntityId e = scene.world().create_entity("s");
     scene.world().emplace<ScriptComponent>(e).path = path;

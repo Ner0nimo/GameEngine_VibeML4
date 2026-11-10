@@ -40,8 +40,7 @@ Scene make_physics_scene() {
 TEST(Physics, BoxFallsAndRestsOnGround) {
     Scene scene = make_physics_scene();
     PhysicsSystem physics(scene);
-    std::string err;
-    ASSERT_TRUE(physics.init({0.f, -9.81f, 0.f}, &err)) << err;
+    ASSERT_TRUE(physics.init({0.f, -9.81f, 0.f}).ok());
 
     EntityId box = NULL_ENTITY;
     for (EntityId e : scene.world().all_entities()) {
@@ -66,8 +65,7 @@ TEST(Physics, BoxFallsAndRestsOnGround) {
 TEST(Physics, RaycastHitsGround) {
     Scene scene = make_physics_scene();
     PhysicsSystem physics(scene);
-    std::string err;
-    ASSERT_TRUE(physics.init({0.f, -9.81f, 0.f}, &err));
+    ASSERT_TRUE(physics.init({0.f, -9.81f, 0.f}).ok());
     physics.update(scene.world(), 1.f / 60.f); // create bodies
 
     // Offset in X so the ray misses the falling box (at x=0) and hits the ground.
@@ -101,8 +99,7 @@ TEST(Physics, SphereCollider) {
     bc.radius = 0.5f;
 
     PhysicsSystem physics(scene);
-    std::string err;
-    ASSERT_TRUE(physics.init({0.f, -9.81f, 0.f}, &err));
+    ASSERT_TRUE(physics.init({0.f, -9.81f, 0.f}).ok());
     for (int i = 0; i < 180; ++i) physics.update(scene.world(), 1.f / 60.f);
     // Sphere rests at ground top (1) + radius (0.5).
     EXPECT_NEAR(scene.world().get<TransformComponent>(ball)->position.y, 1.5f, 0.05f);

@@ -64,21 +64,27 @@ int main(int argc, char** argv) {
     PakWriter writer;
 
     // Scene goes in as "scene.json".
-    writer.add_file_from_disk("scene.json", scene_path);
+    if (auto r = writer.add_file_from_disk("scene.json", scene_path); !r.ok()) {
+        IGNIS_ERROR("{}", r.error());
+        return 1;
+    }
 
     // Includes: preserve their path relative to CWD.
     for (const auto& inc : includes) {
         std::vector<std::pair<std::string, fs::path>> files;
         collect_files(inc, fs::current_path(), files);
         for (const auto& [rel, path] : files) {
-            writer.add_file_from_disk(rel, path.string());
+            if (auto r = writer.add_file_from_disk(rel, path.string()); !r.ok()) {
+                IGNIS_ERROR("{}", r.error());
+                return 1;
+            }
         }
     }
 
     fs::create_directories(out_dir);
     const std::string pak_path = (fs::path(out_dir) / "game.ignispak").string();
-    if (!writer.write(pak_path)) {
-        IGNIS_ERROR("failed to write {}", pak_path);
+    if (auto r = writer.write(pak_path); !r.ok()) {
+        IGNIS_ERROR("{}", r.error());
         return 1;
     }
 
@@ -99,14 +105,13 @@ int main(int argc, char** argv) {
 
     // Verify: read the pak back.
     PakReader reader;
-    if (!reader.open(pak_path)) {
-        IGNIS_ERROR("pak verification failed: cannot reopen {}", pak_path);
+    if (auto r = reader.open(pak_path); !r.ok()) {
+        IGNIS_ERROR("pak verification failed: {}", r.error());
         return 1;
     }
     for (const auto& name : reader.list()) {
-        std::vector<u8> data;
-        if (!reader.read(name, data)) {
-            IGNIS_ERROR("pak verification failed for '{}'", name);
+        if (auto r = reader.read(name); !r.ok()) {
+            IGNIS_ERROR("pak verification failed for '{}': {}", name, r.error());
             return 1;
         }
     }

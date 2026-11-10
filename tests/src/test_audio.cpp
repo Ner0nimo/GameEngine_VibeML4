@@ -1,6 +1,12 @@
 #include <gtest/gtest.h>
 
+#include "ignis/agent/commands.h"
+#include "ignis/assets/asset_manager.h"
 #include "ignis/audio/audio_engine.h"
+#include "ignis/audio/audio_system.h"
+#include "ignis/core/pak.h"
+#include "ignis/ecs/components.h"
+#include "ignis/scene/scene.h"
 
 #include <cmath>
 #include <cstring>
@@ -80,8 +86,7 @@ TEST(Audio, DecodeWavFromFile) {
 
 TEST(Audio, EngineNullDevice) {
     AudioEngine engine;
-    std::string err;
-    ASSERT_TRUE(engine.init(true, err)) << err; // null device (headless)
+    ASSERT_TRUE(engine.init(true).ok()); // null device (headless)
     EXPECT_TRUE(engine.is_null_device());
 
     // Play the generated wav; with no device the handle must still be valid.
@@ -91,16 +96,204 @@ TEST(Audio, EngineNullDevice) {
         std::ofstream f(path, std::ios::binary);
         f.write(reinterpret_cast<const char*>(wav.data()), static_cast<std::streamsize>(wav.size()));
     }
-    const u32 id = engine.play(path.string(), 0.5f, false);
+    auto played = engine.play(path.string(), 0.5f, false);
+    ASSERT_TRUE(played.ok()) << played.error();
+    const u32 id = played.value();
     EXPECT_GT(id, 0u);
     EXPECT_EQ(engine.active_sound_count(), 1u);
     engine.stop(id);
     EXPECT_EQ(engine.active_sound_count(), 0u);
 
-    // Missing file -> id 0.
-    EXPECT_EQ(engine.play("/nonexistent.wav"), 0u);
+    // Missing file -> failure with a message.
+    auto missing = engine.play("/nonexistent.wav");
+    EXPECT_FALSE(missing.ok());
+    EXPECT_FALSE(missing.error().empty());
 
     engine.shutdown();
     EXPECT_FALSE(engine.is_initialized());
     std::filesystem::remove(path);
+}
+
+TEST(Audio, PlayMemoryAndPerSoundControl) {
+    AudioEngine engine;
+    ASSERT_TRUE(engine.init(true).ok());
+
+    const auto wav = make_wav();
+    auto started = engine.play_memory(wav.data(), wav.size(), 0.5f, true);
+    ASSERT_TRUE(started.ok()) << started.error();
+    const u32 id = started.value();
+    EXPECT_EQ(engine.active_sound_count(), 1u);
+    EXPECT_TRUE(engine.is_playing(id));
+
+    // Per-sound control must not crash and must keep the handle alive.
+    engine.set_sound_volume(id, 0.25f);
+    engine.set_sound_pitch(id, 1.5f);
+    engine.set_sound_position(id, {1.f, 2.f, 3.f});
+    engine.set_sound_spatial(id, true, 1.f, 20.f);
+    engine.set_listener({0.f, 0.f, 5.f}, {0.f, 0.f, -1.f});
+    EXPECT_TRUE(engine.is_playing(id));
+    EXPECT_FALSE(engine.is_playing(9999u)); // unknown id
+
+    engine.stop(id);
+    EXPECT_EQ(engine.active_sound_count(), 0u);
+    EXPECT_FALSE(engine.is_playing(id));
+
+    // Garbage memory -> failure.
+    const char junk[] = "not audio at all";
+    EXPECT_FALSE(engine.play_memory(junk, sizeof(junk)).ok());
+    engine.shutdown();
+}
+
+TEST(Audio, PlayFromPakViaAssetManager) {
+    // Pack the wav into an IGPK and play it through AssetManager (pak path
+    // that does not exist on disk).
+    const auto wav = make_wav();
+    const auto pak_path = std::filesystem::temp_directory_path() / "ignis_audio_test.ignispak";
+    {
+        PakWriter w;
+        w.add_file("sfx/beep.wav", wav);
+        ASSERT_TRUE(w.write(pak_path.string()).ok());
+    }
+    PakReader pak;
+    ASSERT_TRUE(pak.open(pak_path.string()).ok());
+    AssetManager assets;
+    assets.set_pak(&pak);
+
+    AudioEngine engine;
+    ASSERT_TRUE(engine.init(true).ok());
+    engine.set_asset_manager(&assets);
+    auto played = engine.play("sfx/beep.wav", 1.f, false);
+    ASSERT_TRUE(played.ok()) << played.error();
+    const u32 id = played.value();
+    EXPECT_TRUE(engine.is_playing(id));
+    engine.stop(id);
+    EXPECT_EQ(engine.active_sound_count(), 0u);
+    engine.shutdown();
+    std::filesystem::remove(pak_path);
+}
+
+TEST(Audio, SourceComponentIORoundtrip) {
+    AudioSourceComponent c;
+    c.path = "assets/test.wav";
+    c.volume = 0.8f;
+    c.pitch = 1.25f;
+    c.loop = true;
+    c.play_on_start = true;
+    c.spatial = true;
+    c.min_distance = 2.f;
+    c.max_distance = 40.f;
+    const nlohmann::json j = ComponentIO<AudioSourceComponent>::to_json(c);
+    const AudioSourceComponent back = ComponentIO<AudioSourceComponent>::from_json(j);
+    EXPECT_EQ(back.path, c.path);
+    EXPECT_NEAR(back.volume, c.volume, 1e-6f);
+    EXPECT_NEAR(back.pitch, c.pitch, 1e-6f);
+    EXPECT_EQ(back.loop, c.loop);
+    EXPECT_EQ(back.play_on_start, c.play_on_start);
+    EXPECT_EQ(back.spatial, c.spatial);
+    EXPECT_NEAR(back.min_distance, c.min_distance, 1e-6f);
+    EXPECT_NEAR(back.max_distance, c.max_distance, 1e-6f);
+
+    // Defaults for a minimal JSON object.
+    const auto def = ComponentIO<AudioSourceComponent>::from_json(nlohmann::json::object());
+    EXPECT_TRUE(def.path.empty());
+    EXPECT_NEAR(def.volume, 1.f, 1e-6f);
+    EXPECT_FALSE(def.loop);
+    EXPECT_FALSE(def.play_on_start);
+    EXPECT_FALSE(def.spatial);
+}
+
+TEST(Audio, AudioSystemPlayOnStartAndControl) {
+    Scene scene("audio_sys_test");
+    register_builtin_components(scene.world());
+    AudioSystem::register_components(scene.world());
+
+    AudioEngine engine;
+    ASSERT_TRUE(engine.init(true).ok());
+    AudioSystem sys(engine, &scene);
+
+    EntityId e = scene.world().create_entity("emitter");
+    auto& t = scene.world().emplace<TransformComponent>(e);
+    t.position = {2.f, 1.f, 0.f};
+    auto& src = scene.world().emplace<AudioSourceComponent>(e);
+    src.path = "assets/test.wav";
+    src.loop = true;
+    src.play_on_start = true;
+    src.spatial = true;
+    src.min_distance = 1.f;
+    src.max_distance = 30.f;
+
+    const f32 dt = 1.f / 60.f;
+    sys.update(scene.world(), dt);
+    EXPECT_TRUE(sys.source_playing(e));
+    EXPECT_EQ(engine.active_sound_count(), 1u);
+
+    // Moving the transform must not break positional sync.
+    t.position = {5.f, 1.f, 0.f};
+    sys.update(scene.world(), dt);
+    EXPECT_TRUE(sys.source_playing(e));
+
+    // Stop / restart on demand.
+    sys.stop_source(e, scene.world());
+    EXPECT_FALSE(sys.source_playing(e));
+    EXPECT_EQ(engine.active_sound_count(), 0u);
+    EXPECT_GT(sys.play_source(e, scene.world()), 0u);
+    EXPECT_TRUE(sys.source_playing(e));
+
+    // Destroying the entity stops its sound on the next update.
+    scene.world().destroy_entity(e);
+    sys.update(scene.world(), dt);
+    EXPECT_EQ(engine.active_sound_count(), 0u);
+
+    // play_on_start must not fire for a source without the flag.
+    EntityId e2 = scene.world().create_entity("quiet");
+    scene.world().emplace<AudioSourceComponent>(e2).path = "assets/test.wav";
+    sys.update(scene.world(), dt);
+    EXPECT_FALSE(sys.source_playing(e2));
+    EXPECT_EQ(engine.active_sound_count(), 0u);
+
+    engine.shutdown();
+}
+
+TEST(Audio, AudioSourceViaAgentCommand) {
+    Scene scene("audio_cmd_test");
+    register_builtin_components(scene.world());
+    AudioSystem::register_components(scene.world());
+    AssetManager assets;
+    CommandProcessor proc(scene, assets);
+
+    const auto created = proc.execute({{"cmd", "create_entity"}, {"name", "Speaker"}});
+    ASSERT_TRUE(created.ok) << created.message;
+    const EntityId e = created.data["entity"].get<EntityId>();
+
+    const auto r = proc.execute({{"cmd", "add_component"},
+                                 {"entity", e},
+                                 {"component", "AudioSource"},
+                                 {"props", {{"path", "assets/test.wav"},
+                                            {"volume", 0.5},
+                                            {"loop", true},
+                                            {"play_on_start", true},
+                                            {"spatial", true},
+                                            {"max_distance", 12}}}});
+    ASSERT_TRUE(r.ok) << r.message;
+
+    const auto* src = scene.world().get<AudioSourceComponent>(e);
+    ASSERT_NE(src, nullptr);
+    EXPECT_EQ(src->path, "assets/test.wav");
+    EXPECT_NEAR(src->volume, 0.5f, 1e-6f);
+    EXPECT_TRUE(src->loop);
+    EXPECT_TRUE(src->play_on_start);
+    EXPECT_TRUE(src->spatial);
+    EXPECT_NEAR(src->max_distance, 12.f, 1e-6f);
+
+    // And it shows up in get_entity serialization.
+    const auto g = proc.execute({{"cmd", "get_entity"}, {"entity", e}});
+    ASSERT_TRUE(g.ok) << g.message;
+    bool found = false;
+    for (const auto& c : g.data["components"]) {
+        if (c["type"] == "AudioSource") {
+            found = true;
+            EXPECT_EQ(c["data"]["path"], "assets/test.wav");
+        }
+    }
+    EXPECT_TRUE(found);
 }

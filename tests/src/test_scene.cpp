@@ -62,10 +62,10 @@ TEST(Scene, SpawnPrefab) {
 TEST(Scene, SaveLoadFile) {
     Scene scene = make_scene();
     const auto path = std::filesystem::temp_directory_path() / "ignis_test_scene.json";
-    ASSERT_TRUE(scene.save_to_file(path.string()));
-    bool ok = false;
-    Scene loaded = Scene::load_from_file(path.string(), ok);
-    ASSERT_TRUE(ok);
+    ASSERT_TRUE(scene.save_to_file(path.string()).ok());
+    auto loaded_r = Scene::load_from_file(path.string());
+    ASSERT_TRUE(loaded_r.ok()) << loaded_r.error();
+    Scene loaded = std::move(loaded_r.value());
     EXPECT_EQ(loaded.world().entity_count(), 2u);
     std::filesystem::remove(path);
 }

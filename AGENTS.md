@@ -42,7 +42,8 @@ scripting/  ignis_scripting: Lua 5.4 engine, full ECS/scene bindings (ignis.*)
 physics/    ignis_physics: reactphysics3d wrapper, RigidBody/Collider components,
             raycast + collision events, ignis.physics.* Lua bindings
 audio/      ignis_audio: miniaudio engine, decode helpers, null-device mode,
-            ignis.audio.* Lua bindings
+            AudioSource component + AudioSystem (spatial 3D audio, pak-aware
+            playback), ignis.audio.* Lua bindings
 window/     ignis_window: GLFW wrapper (Vulkan surface in graphics builds)
 renderer/   ignis_renderer: IRenderer iface, VulkanRenderer (NVRHI), picking,
             IBL (CPU equirect->irradiance), debug lines
@@ -67,6 +68,59 @@ Module dependency rule: lower modules never depend on higher ones
 - New components: define struct + `ComponentIO<T>` specialization, register
   with `world.register_component_type<T>("Name")` (see `components.h`,
   `physics_world.h`).
+
+## Function design rules (the three rules)
+
+Every function in Ignis follows these three rules. When auditing or writing
+code, check each function against all three.
+
+### 1. Build your system out of honest functions; inject dishonesty at the topmost possible level
+
+A function does exactly what its name and contract say — no silent coercions,
+no hidden fallbacks, no magic sentinel behavior buried inside. When the real
+world forces dishonesty (a driver may crash, a file may be corrupt, an input
+may be invalid), handle it as high up the call stack as possible (usually
+`main()` / `EditorApp::run()` / a top-level orchestrator) and let lower levels
+report failure honestly instead of papering over it.
+
+- `World::set_parent` returns `bool` and refuses dead parents and cycles at
+  write time; `world_matrix` then trusts the acyclic invariant instead of
+  carrying a magic "guard < 1024" loop.
+- `Scene::load_file` really loads INTO the scene (keeps registered systems)
+  instead of silently doing `*this = deserialize(...)`.
+- Low-level functions return `Result<T>` and never swallow errors; the
+  top-level caller decides what to do with `r.error()`. The fork-based Vulkan
+  probe lives in `EditorApp::run`/`main` — that is the topmost level where
+  "the driver might segfault" belongs.
+
+### 2. Signatures should communicate and show empathy for callers
+
+The signature alone should tell the caller what the function does, what it
+needs, and how it can fail. If a caller has to declare a temp string just to
+receive an error, or guess whether `0`/`-1`/`nullptr` means failure, the
+signature is not empathetic.
+
+- Prefer `Result<T>` (see `core/result.h`) over `bool f(..., std::string& err)`:
+  `Result<void> AudioEngine::init(bool null_device)` — one object carries
+  success and message: `if (auto r = audio.init(true); !r.ok()) log(r.error());`
+- Prefer returning values over out-params:
+  `Result<std::vector<u8>> PakReader::read(path)` instead of
+  `bool read(path, std::vector<u8>& out)`;
+  `picking::Ray screen_ray(cam, aspect, x, y)` instead of two out-params;
+  `std::optional<f32> ray_aabb(...)` instead of a `-1` sentinel;
+  `FramebufferSize framebuffer_size()` instead of `void f(u32&, u32&)`.
+
+### 3. Stay at one level of abstraction
+
+A function body should read like a summary of what happens; every step that
+belongs to a lower level of detail goes into its own named function one level
+down. Don't mix "create window" with "fill in VkInstanceCreateInfo".
+
+- `ScriptEngine::update` iterates script entities and delegates the actual
+  call to `run_callback(env_ref, "on_update", true, dt)`.
+- `AudioSystem::update` = `stop_orphaned_sources(world)` + `update_source(e, world)` per entity.
+- `EditorApp::run` is split into `init_*` helpers and the main loop instead of
+  one 400-line body mixing window, renderer, ImGui and UI code.
 
 ## Adding a feature (workflow)
 

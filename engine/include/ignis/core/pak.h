@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ignis/core/result.h"
 #include "ignis/core/types.h"
 
 #include <string>
@@ -21,8 +22,8 @@ namespace ignis {
 class PakWriter {
 public:
     void add_file(const std::string& pak_path, const std::vector<u8>& data);
-    void add_file_from_disk(const std::string& pak_path, const std::string& disk_path);
-    bool write(const std::string& out_path) const;
+    Result<void> add_file_from_disk(const std::string& pak_path, const std::string& disk_path);
+    Result<void> write(const std::string& out_path) const;
 
 private:
     struct Entry { std::string pak_path; std::vector<u8> data; };
@@ -31,10 +32,10 @@ private:
 
 class PakReader {
 public:
-    bool open(const std::string& path);
+    Result<void> open(const std::string& path);
     bool is_open() const { return is_open_; }
     bool has(const std::string& pak_path) const;
-    bool read(const std::string& pak_path, std::vector<u8>& out) const;
+    Result<std::vector<u8>> read(const std::string& pak_path) const;
     std::vector<std::string> list() const;
 
 private:

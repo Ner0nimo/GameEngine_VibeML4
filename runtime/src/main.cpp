@@ -11,6 +11,7 @@
 #include "ignis/agent/commands.h"
 #include "ignis/assets/asset_manager.h"
 #include "ignis/audio/audio_engine.h"
+#include "ignis/audio/audio_system.h"
 #include "ignis/core/log.h"
 #include "ignis/core/pak.h"
 #include "ignis/ecs/components.h"
@@ -92,8 +93,9 @@ int main(int argc, char** argv) {
     AssetManager assets;
     PakReader pak;
     if (!args.pak_path.empty()) {
-        if (!pak.open(args.pak_path)) {
-            IGNIS_ERROR("cannot open pak '{}'", args.pak_path);
+        auto opened = pak.open(args.pak_path);
+        if (!opened.ok()) {
+            IGNIS_ERROR("{}", opened.error());
             return 1;
         }
         assets.set_pak(&pak);
@@ -104,52 +106,61 @@ int main(int argc, char** argv) {
     Scene scene;
     register_builtin_components(scene.world());
     PhysicsSystem::register_components(scene.world());
+    AudioSystem::register_components(scene.world());
 
-    bool ok = false;
     if (!args.pak_path.empty()) {
-        std::vector<u8> bytes;
-        if (!pak.read("scene.json", bytes)) {
-            IGNIS_ERROR("pak '{}' has no scene.json", args.pak_path);
+        auto bytes = pak.read("scene.json");
+        if (!bytes.ok()) {
+            IGNIS_ERROR("pak '{}' has no scene.json ({})", args.pak_path, bytes.error());
             return 1;
         }
-        std::string text(bytes.begin(), bytes.end());
+        std::string text(bytes.value().begin(), bytes.value().end());
         scene = Scene::deserialize(nlohmann::json::parse(text));
-        ok = true;
     } else {
-        ok = scene.load_file(args.scene_path);
-    }
-    if (!ok) {
-        IGNIS_ERROR("cannot load scene '{}'", args.scene_path);
-        return 1;
+        auto loaded = scene.load_file(args.scene_path);
+        if (!loaded.ok()) {
+            IGNIS_ERROR("{}", loaded.error());
+            return 1;
+        }
     }
 
     // --- systems --------------------------------------------------------------
     ScriptEngine scripts;
-    {
-        std::string err;
-        if (!scripts.init(&scene, &assets, err)) {
-            IGNIS_ERROR("script engine init failed: {}", err);
-            return 1;
-        }
+    if (auto r = scripts.init(&scene, &assets); !r.ok()) {
+        IGNIS_ERROR("script engine init failed: {}", r.error());
+        return 1;
     }
     AudioEngine audio;
-    {
-        std::string err;
-        audio.init(args.headless, err); // null device when headless
-        AudioEngine::register_lua_bindings(scripts.state());
+    if (auto r = audio.init(args.headless); !r.ok()) { // null device when headless
+        IGNIS_ERROR("audio init failed: {}", r.error());
+        return 1;
     }
+    audio.set_asset_manager(&assets); // pak-aware playback
+    AudioEngine::register_lua_bindings(scripts.state());
+    AudioSystem audio_sys(audio, &scene);
+    AudioSystem::register_lua_bindings(scripts.state());
     PhysicsSystem physics(scene);
-    {
-        std::string err;
-        if (!physics.init({0.f, -9.81f, 0.f}, &err)) {
-            IGNIS_ERROR("physics init failed: {}", err);
-            return 1;
-        }
-        PhysicsSystem::register_lua_bindings(scripts.state());
+    if (auto r = physics.init({0.f, -9.81f, 0.f}); !r.ok()) {
+        IGNIS_ERROR("physics init failed: {}", r.error());
+        return 1;
     }
+    PhysicsSystem::register_lua_bindings(scripts.state());
 
     scene.add_system([&](World&, f32 dt) { scripts.update(dt); });
     scene.add_system([&](World& w, f32 dt) { physics.update(w, dt); });
+    scene.add_system([&](World& w, f32 dt) { audio_sys.update(w, dt); });
+
+    // Keep the 3D audio listener on the active camera.
+    auto sync_listener = [&]() {
+        for (EntityId e : scene.world().view<CameraComponent, TransformComponent>()) {
+            const auto* cc = scene.world().get<CameraComponent>(e);
+            const auto* tc = scene.world().get<TransformComponent>(e);
+            if (cc && cc->active && tc) {
+                const math::Vec3 fwd = tc->rotation * math::Vec3(0.f, 0.f, -1.f);
+                audio_sys.set_listener(tc->position, fwd);
+            }
+        }
+    };
 
     // --- agent commands (AI-controllable) ------------------------------------
     if (!args.commands_path.empty()) {
@@ -164,6 +175,7 @@ int main(int argc, char** argv) {
     if (args.headless) {
         for (int i = 0; i < args.frames; ++i) {
             scene.update(args.dt);
+            sync_listener();
         }
         if (!args.dump_path.empty()) {
             std::ofstream f(args.dump_path);
@@ -177,9 +189,8 @@ int main(int argc, char** argv) {
 #ifdef IGNIS_WITH_GRAPHICS
     // Graphics path: window + Vulkan renderer.
     Window window({args.scene_path, 1280, 720, true, true});
-    std::string err;
-    if (!window.init(err)) {
-        IGNIS_ERROR("window init failed: {}", err);
+    if (auto r = window.init(); !r.ok()) {
+        IGNIS_ERROR("window init failed: {}", r.error());
         return 1;
     }
     {
@@ -190,8 +201,7 @@ int main(int argc, char** argv) {
             const pid_t pid = fork();
             if (pid == 0) {
                 VulkanRenderer probeRenderer;
-                std::string probeErr;
-                if (!probeRenderer.init_offscreen(64, 64, probeErr)) _exit(2);
+                if (!probeRenderer.init_offscreen(64, 64).ok()) _exit(2);
                 probeRenderer.shutdown();
                 _exit(0);
             }
@@ -206,8 +216,8 @@ int main(int argc, char** argv) {
         }
     }
     VulkanRenderer renderer;
-    if (!renderer.init(&window, err)) {
-        IGNIS_ERROR("renderer init failed: {}", err);
+    if (auto r = renderer.init(&window); !r.ok()) {
+        IGNIS_ERROR("renderer init failed: {}", r.error());
         return 1;
     }
     // Find active camera entity.
@@ -216,6 +226,7 @@ int main(int argc, char** argv) {
         window.poll_events();
         const f32 dt = window.delta_time();
         scene.update(dt);
+        sync_listener();
         for (EntityId e : scene.world().view<CameraComponent, TransformComponent>()) {
             const auto* cc = scene.world().get<CameraComponent>(e);
             const auto* tc = scene.world().get<TransformComponent>(e);
@@ -227,8 +238,8 @@ int main(int argc, char** argv) {
                 camera.z_far = cc->z_far;
             }
         }
-        u32 w = 0, h = 0;
-        window.framebuffer_size(w, h);
+        const FramebufferSize fb = window.framebuffer_size();
+        const u32 w = fb.width, h = fb.height;
         if (w > 0 && h > 0) {
             renderer.render(scene, camera, dt);
             renderer.present();

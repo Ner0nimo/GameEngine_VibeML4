@@ -29,11 +29,12 @@ std::vector<float> read_accessor_floats(const cgltf_accessor* acc) {
 } // namespace
 
 std::shared_ptr<Model> AssetManager::load_model_impl(const std::string& path) {
-    std::vector<u8> bytes;
-    if (!read_file(path, bytes)) {
-        IGNIS_ERROR("load_model: cannot read '{}'", path);
+    auto bytes_r = read_file(path);
+    if (!bytes_r.ok()) {
+        IGNIS_ERROR("load_model: {}", bytes_r.error());
         return nullptr;
     }
+    const std::vector<u8>& bytes = bytes_r.value();
 
     cgltf_options options{};
     std::memset(&options, 0, sizeof(options));

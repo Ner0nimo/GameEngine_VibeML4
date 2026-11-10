@@ -11,24 +11,24 @@ TEST(Picking, ScreenRayCenter) {
     Camera cam;
     cam.position = {1.f, 2.f, 3.f};
     cam.rotation = math::Quat(1.f, 0.f, 0.f, 0.f); // identity: looks down -Z
-    math::Vec3 o, d;
-    picking::screen_ray(cam, 1.f, 0.f, 0.f, o, d);
-    EXPECT_NEAR(o.x, 1.f, 1e-6f);
-    EXPECT_NEAR(d.x, 0.f, 1e-6f);
-    EXPECT_NEAR(d.y, 0.f, 1e-6f);
-    EXPECT_NEAR(d.z, -1.f, 1e-6f);
+    const picking::Ray r = picking::screen_ray(cam, 1.f, 0.f, 0.f);
+    EXPECT_NEAR(r.origin.x, 1.f, 1e-6f);
+    EXPECT_NEAR(r.dir.x, 0.f, 1e-6f);
+    EXPECT_NEAR(r.dir.y, 0.f, 1e-6f);
+    EXPECT_NEAR(r.dir.z, -1.f, 1e-6f);
 }
 
 TEST(Picking, RayAabb) {
     const math::Vec3 o{0.f, 0.f, -5.f};
     const math::Vec3 d{0.f, 0.f, 1.f};
-    const f32 hit = picking::ray_aabb(o, d, {0.f, 0.f, 0.f}, {1.f, 1.f, 1.f});
-    EXPECT_NEAR(hit, 4.f, 1e-5f);
-    const f32 miss = picking::ray_aabb(o, d, {10.f, 0.f, 0.f}, {1.f, 1.f, 1.f});
-    EXPECT_EQ(miss, -1.f);
+    const auto hit = picking::ray_aabb(o, d, {0.f, 0.f, 0.f}, {1.f, 1.f, 1.f});
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_NEAR(*hit, 4.f, 1e-5f);
+    EXPECT_FALSE(picking::ray_aabb(o, d, {10.f, 0.f, 0.f}, {1.f, 1.f, 1.f}).has_value());
     // Ray starting inside the box hits at t=0.
-    const f32 inside = picking::ray_aabb({0.f, 0.f, 0.f}, d, {0.f, 0.f, 0.f}, {1.f, 1.f, 1.f});
-    EXPECT_NEAR(inside, 0.f, 1e-6f);
+    const auto inside = picking::ray_aabb({0.f, 0.f, 0.f}, d, {0.f, 0.f, 0.f}, {1.f, 1.f, 1.f});
+    ASSERT_TRUE(inside.has_value());
+    EXPECT_NEAR(*inside, 0.f, 1e-6f);
 }
 
 TEST(Ibl, SampleEquirect) {

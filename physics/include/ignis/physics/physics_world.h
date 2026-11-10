@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ignis/core/result.h"
 #include "ignis/core/types.h"
 #include "ignis/ecs/components.h"
 #include "ignis/ecs/entity.h"
@@ -111,7 +112,7 @@ public:
     PhysicsSystem(const PhysicsSystem&) = delete;
     PhysicsSystem& operator=(const PhysicsSystem&) = delete;
 
-    bool init(math::Vec3 gravity = {0.f, -9.81f, 0.f}, std::string* err = nullptr);
+    Result<void> init(math::Vec3 gravity = {0.f, -9.81f, 0.f});
     void shutdown();
     bool is_initialized() const { return world_ != nullptr; }
 

@@ -60,7 +60,7 @@ add_custom_command(
     OUTPUT "${IGNIS_EMBED_HEADER}"
     COMMAND "${CMAKE_COMMAND}" "-DSHADER_DIR=${IGNIS_SPV_DIR}" "-DOUT=${IGNIS_EMBED_HEADER}"
             "-P" "${CMAKE_SOURCE_DIR}/cmake/EmbedShaders.cmake"
-    DEPENDS ${IGNIS_SPV_FILES}
+    DEPENDS ${IGNIS_SPV_FILES} "${CMAKE_SOURCE_DIR}/cmake/EmbedShaders.cmake"
     COMMENT "Embedding SPIR-V shaders"
     VERBATIM)
 add_custom_target(ignis_shaders_embedded DEPENDS "${IGNIS_EMBED_HEADER}")

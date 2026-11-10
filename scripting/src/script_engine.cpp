@@ -167,8 +167,8 @@ int l_entity_parent(lua_State* L) {
 int l_entity_set_parent(lua_State* L) {
     EntityId e = static_cast<EntityId>(luaL_checkinteger(L, 1));
     EntityId p = static_cast<EntityId>(luaL_checkinteger(L, 2));
-    get_scene(L)->world().set_parent(e, p);
-    return 0;
+    lua_pushboolean(L, get_scene(L)->world().set_parent(e, p) ? 1 : 0);
+    return 1;
 }
 
 int l_entity_children(lua_State* L) {
@@ -187,8 +187,7 @@ int l_entity_add_component(lua_State* L) {
     const ComponentTypeInfo* info = w.registry().find_by_name(comp ? comp : "");
     if (!info) { lua_pushnil(L); lua_pushstring(L, "unknown component"); return 2; }
     nlohmann::json props = lua_isnoneornil(L, 3) ? nlohmann::json::object() : lua_to_json(L, 3);
-    info->deserialize(w, e, props);
-    lua_pushboolean(L, 1);
+    lua_pushboolean(L, info->deserialize(w, e, props) ? 1 : 0);
     return 1;
 }
 
@@ -198,9 +197,7 @@ int l_entity_get_component(lua_State* L) {
     const World& w = get_scene(L)->world();
     const ComponentTypeInfo* info = w.registry().find_by_name(comp ? comp : "");
     if (!info || !info->serialize) { lua_pushnil(L); return 1; }
-    // serialize needs a non-const World& signature; const_cast is safe here
-    // because serialize only reads.
-    nlohmann::json j = info->serialize(const_cast<World&>(w), e);
+    nlohmann::json j = info->serialize(w, e);
     if (j.is_null()) { lua_pushnil(L); return 1; }
     push_json(L, j);
     return 1;
@@ -255,7 +252,7 @@ int l_scene_prefabs(lua_State* L) {
 
 int l_scene_save(lua_State* L) {
     const char* path = luaL_checkstring(L, 1);
-    lua_pushboolean(L, get_scene(L)->save_to_file(path) ? 1 : 0);
+    lua_pushboolean(L, get_scene(L)->save_to_file(path ? path : "").ok() ? 1 : 0);
     return 1;
 }
 
@@ -309,14 +306,11 @@ ScriptEngine::~ScriptEngine() {
     shutdown();
 }
 
-bool ScriptEngine::init(Scene* scene, AssetManager* assets, std::string& err) {
+Result<void> ScriptEngine::init(Scene* scene, AssetManager* assets) {
     scene_ = scene;
     assets_ = assets;
     L_ = luaL_newstate();
-    if (!L_) {
-        err = "luaL_newstate failed";
-        return false;
-    }
+    if (!L_) return Result<void>::failure("luaL_newstate failed");
     luaL_openlibs(L_);
     register_bindings(L_);
 
@@ -326,7 +320,7 @@ bool ScriptEngine::init(Scene* scene, AssetManager* assets, std::string& err) {
     lua_setfield(L_, LUA_REGISTRYINDEX, "ignis.assets");
     lua_pushlightuserdata(L_, this);
     lua_setfield(L_, LUA_REGISTRYINDEX, "ignis.engine");
-    return true;
+    return Result<void>::success();
 }
 
 void ScriptEngine::shutdown() {
@@ -338,36 +332,31 @@ void ScriptEngine::shutdown() {
     chunks_.clear();
 }
 
-bool ScriptEngine::load_chunk(const std::string& path, int& registry_ref, std::string& err) {
+Result<int> ScriptEngine::load_chunk(const std::string& path) {
     auto it = chunks_.find(path);
-    if (it != chunks_.end()) {
-        registry_ref = it->second;
-        return true;
-    }
-    std::string source;
-    if (!assets_->read_text(path, source)) {
-        err = "cannot read script '" + path + "'";
-        return false;
-    }
+    if (it != chunks_.end()) return Result<int>::success(it->second);
+    auto source_r = assets_->read_text(path);
+    if (!source_r.ok())
+        return Result<int>::failure("cannot read script '" + path + "': " + source_r.error());
+    const std::string& source = source_r.value();
     if (luaL_loadbuffer(L_, source.data(), source.size(), path.c_str()) != LUA_OK) {
-        err = lua_tostring(L_, -1);
+        std::string err = lua_tostring(L_, -1) ? lua_tostring(L_, -1) : "syntax error";
         lua_pop(L_, 1);
-        return false;
+        return Result<int>::failure("cannot compile script '" + path + "': " + err);
     }
-    registry_ref = luaL_ref(L_, LUA_REGISTRYINDEX);
-    chunks_[path] = registry_ref;
-    return true;
+    const int ref = luaL_ref(L_, LUA_REGISTRYINDEX);
+    chunks_[path] = ref;
+    return Result<int>::success(ref);
 }
 
-bool ScriptEngine::ensure_env(EntityId e, std::string& err) {
+Result<void> ScriptEngine::ensure_env(EntityId e) {
     World& world = scene_->world();
     const auto* script = world.get<ScriptComponent>(e);
-    if (!script || script->path.empty()) {
-        err = "no ScriptComponent with a path";
-        return false;
-    }
-    int chunk_ref = 0;
-    if (!load_chunk(script->path, chunk_ref, err)) return false;
+    if (!script || script->path.empty())
+        return Result<void>::failure("no ScriptComponent with a path");
+    auto chunk_r = load_chunk(script->path);
+    if (!chunk_r.ok()) return Result<void>::failure(chunk_r.error());
+    const int chunk_ref = chunk_r.value();
 
     // env = setmetatable({entity = e}, {__index = _G})
     lua_newtable(L_);
@@ -382,28 +371,32 @@ bool ScriptEngine::ensure_env(EntityId e, std::string& err) {
     lua_rawgeti(L_, LUA_REGISTRYINDEX, chunk_ref);
     lua_setupvalue(L_, -2, 1); // set _ENV of the chunk to env
     if (lua_pcall(L_, 0, 0, 0) != LUA_OK) {
-        err = lua_tostring(L_, -1);
+        std::string err = lua_tostring(L_, -1) ? lua_tostring(L_, -1) : "runtime error";
         lua_pop(L_, 1);
-        return false;
+        return Result<void>::failure("script '" + script->path + "' failed to run: " + err);
     }
 
     const int env_ref = luaL_ref(L_, LUA_REGISTRYINDEX);
     env_refs_[e] = env_ref;
 
-    // on_create(self)
+    run_callback(env_ref, "on_create", false, 0.f);
+    return Result<void>::success();
+}
+
+void ScriptEngine::run_callback(int env_ref, const char* name, bool pass_dt, f32 dt) {
     lua_rawgeti(L_, LUA_REGISTRYINDEX, env_ref);
-    lua_getfield(L_, -1, "on_create");
-    if (lua_isfunction(L_, -1)) {
-        lua_pushvalue(L_, -2); // self = env
-        if (lua_pcall(L_, 1, 0, 0) != LUA_OK) {
-            IGNIS_ERROR("script on_create({}): {}", script->path, lua_tostring(L_, -1));
-            lua_pop(L_, 1);
-        }
-    } else {
+    lua_getfield(L_, -1, name);
+    if (!lua_isfunction(L_, -1)) {
+        lua_pop(L_, 2);
+        return;
+    }
+    lua_pushvalue(L_, -2); // self = env
+    if (pass_dt) lua_pushnumber(L_, static_cast<lua_Number>(dt));
+    if (lua_pcall(L_, pass_dt ? 2 : 1, 0, 0) != LUA_OK) {
+        IGNIS_ERROR("script {}: {}", name, lua_tostring(L_, -1));
         lua_pop(L_, 1);
     }
     lua_pop(L_, 1); // env
-    return true;
 }
 
 void ScriptEngine::update(f32 dt) {
@@ -420,29 +413,16 @@ void ScriptEngine::update(f32 dt) {
         if (!script || !script->enabled) continue;
         if (!world.alive(e)) continue;
 
-        std::string err;
         auto it = env_refs_.find(e);
         if (it == env_refs_.end()) {
-            if (!ensure_env(e, err)) {
-                IGNIS_ERROR("script setup failed for entity {}: {}", e, err);
+            auto env_r = ensure_env(e);
+            if (!env_r.ok()) {
+                IGNIS_ERROR("script setup failed for entity {}: {}", e, env_r.error());
                 continue;
             }
             it = env_refs_.find(e);
         }
-
-        lua_rawgeti(L_, LUA_REGISTRYINDEX, it->second);
-        lua_getfield(L_, -1, "on_update");
-        if (lua_isfunction(L_, -1)) {
-            lua_pushvalue(L_, -2);          // self
-            lua_pushnumber(L_, static_cast<lua_Number>(dt));
-            if (lua_pcall(L_, 2, 0, 0) != LUA_OK) {
-                IGNIS_ERROR("script on_update({}): {}", script->path, lua_tostring(L_, -1));
-                lua_pop(L_, 1);
-            }
-        } else {
-            lua_pop(L_, 1);
-        }
-        lua_pop(L_, 1); // env
+        run_callback(it->second, "on_update", true, dt);
     }
 }
 
@@ -451,18 +431,7 @@ void ScriptEngine::on_entity_destroyed(EntityId e) {
     auto it = env_refs_.find(e);
     if (it == env_refs_.end()) return;
 
-    lua_rawgeti(L_, LUA_REGISTRYINDEX, it->second);
-    lua_getfield(L_, -1, "on_destroy");
-    if (lua_isfunction(L_, -1)) {
-        lua_pushvalue(L_, -2);
-        if (lua_pcall(L_, 1, 0, 0) != LUA_OK) {
-            IGNIS_ERROR("script on_destroy: {}", lua_tostring(L_, -1));
-            lua_pop(L_, 1);
-        }
-    } else {
-        lua_pop(L_, 1);
-    }
-    lua_pop(L_, 1); // env
+    run_callback(it->second, "on_destroy", false, 0.f);
     luaL_unref(L_, LUA_REGISTRYINDEX, it->second);
     env_refs_.erase(it);
 }

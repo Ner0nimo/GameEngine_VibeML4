@@ -7,10 +7,13 @@
 #include "ignis/agent/commands.h"
 #include "ignis/assets/asset_manager.h"
 #include "ignis/audio/audio_engine.h"
+#include "ignis/audio/audio_system.h"
 #include "ignis/ecs/components.h"
 #include "ignis/physics/physics_world.h"
 #include "ignis/scene/scene.h"
 #include "ignis/scripting/script_engine.h"
+
+#include "lua_all.h"
 
 using namespace ignis;
 
@@ -18,23 +21,27 @@ TEST(Integration, TestSceneAllFeatures) {
     Scene scene;
     register_builtin_components(scene.world());
     PhysicsSystem::register_components(scene.world());
-    ASSERT_TRUE(scene.load_file(std::string(IGNIS_SCENES_DIR) + "/test_scene.scene.json"));
+    AudioSystem::register_components(scene.world());
+    ASSERT_TRUE(scene.load_file(std::string(IGNIS_SCENES_DIR) + "/test_scene.scene.json").ok());
 
     AssetManager assets;
     ScriptEngine scripts;
-    std::string err;
-    ASSERT_TRUE(scripts.init(&scene, &assets, err)) << err;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
 
     AudioEngine audio;
-    ASSERT_TRUE(audio.init(true, err)) << err; // null device, headless
+    ASSERT_TRUE(audio.init(true).ok()); // null device, headless
+    audio.set_asset_manager(&assets);
     AudioEngine::register_lua_bindings(scripts.state());
+    AudioSystem audio_sys(audio, &scene);
+    AudioSystem::register_lua_bindings(scripts.state());
 
     PhysicsSystem physics(scene);
-    ASSERT_TRUE(physics.init({0.f, -9.81f, 0.f}, &err)) << err;
+    ASSERT_TRUE(physics.init({0.f, -9.81f, 0.f}).ok());
     PhysicsSystem::register_lua_bindings(scripts.state());
 
     scene.add_system([&](World&, f32 dt) { scripts.update(dt); });
     scene.add_system([&](World& w, f32 dt) { physics.update(w, dt); });
+    scene.add_system([&](World& w, f32 dt) { audio_sys.update(w, dt); });
 
     // Agent commands: create an entity via JSON command (AI-controllable path).
     CommandProcessor proc(scene, assets);
@@ -88,10 +95,45 @@ TEST(Integration, TestSceneAllFeatures) {
     const RaycastHit hit = physics.raycast({0.f, 10.f, 0.f}, {0.f, -1.f, 0.f}, 100.f);
     EXPECT_TRUE(hit.hit);
 
-    // 7. Scene serializes cleanly after all of this.
+    // 7. AudioSource: SoundEmitter auto-started (play_on_start), was stopped
+    //    and restarted from Lua (mover.lua frames 120/150).
+    EntityId emitter = NULL_ENTITY;
+    for (EntityId e : scene.world().all_entities()) {
+        if (scene.world().name_of(e) == "SoundEmitter") emitter = e;
+    }
+    ASSERT_NE(emitter, NULL_ENTITY);
+    const auto* src = scene.world().get<AudioSourceComponent>(emitter);
+    ASSERT_NE(src, nullptr);
+    EXPECT_EQ(src->path, "assets/test.wav");
+    EXPECT_TRUE(src->play_on_start);
+    EXPECT_TRUE(src->spatial);
+    EXPECT_TRUE(audio_sys.source_playing(emitter));
+    EXPECT_GE(audio.active_sound_count(), 1u);
+    auto lua_bool = [&](const char* name) {
+        lua_getglobal(scripts.state(), name);
+        const bool v = lua_toboolean(scripts.state(), -1) != 0;
+        lua_pop(scripts.state(), 1);
+        return v;
+    };
+    EXPECT_TRUE(lua_bool("mover_src_playing"));
+    EXPECT_TRUE(lua_bool("mover_src_stopped"));
+    EXPECT_TRUE(lua_bool("mover_src_restarted"));
+
+    // 8. Scene serializes cleanly after all of this, AudioSource included.
     const nlohmann::json j = scene.serialize();
     EXPECT_EQ(j["name"], "test_scene");
     EXPECT_FALSE(j["entities"].empty());
     Scene reloaded = Scene::deserialize(j);
     EXPECT_EQ(reloaded.world().entity_count(), scene.world().entity_count());
+    EntityId reloaded_emitter = NULL_ENTITY;
+    for (EntityId e : reloaded.world().all_entities()) {
+        if (reloaded.world().name_of(e) == "SoundEmitter") reloaded_emitter = e;
+    }
+    ASSERT_NE(reloaded_emitter, NULL_ENTITY);
+    const auto* rsrc = reloaded.world().get<AudioSourceComponent>(reloaded_emitter);
+    ASSERT_NE(rsrc, nullptr);
+    EXPECT_EQ(rsrc->path, "assets/test.wav");
+    EXPECT_TRUE(rsrc->loop);
+    EXPECT_TRUE(rsrc->spatial);
+    EXPECT_NEAR(rsrc->volume, 0.8f, 1e-6f);
 }

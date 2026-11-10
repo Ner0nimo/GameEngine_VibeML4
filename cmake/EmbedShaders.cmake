@@ -25,7 +25,7 @@ foreach(f ${SPV_FILES})
 endforeach()
 
 string(APPEND CONTENT "// Returns the SPIR-V words for a shader name (e.g. \"gbuffer_vert\") or nullptr.\n")
-string(APPEND CONTENT "inline const uint32_t* find(const std::string& name, size_t& words) {\n")
+string(APPEND CONTENT "inline const uint32_t* find([[maybe_unused]] const std::string& name, size_t& words) {\n")
 string(APPEND CONTENT "${ENTRIES}")
 string(APPEND CONTENT "    words = 0;\n    return nullptr;\n}\n\n")
 string(APPEND CONTENT "} // namespace ignis::shaders\n")

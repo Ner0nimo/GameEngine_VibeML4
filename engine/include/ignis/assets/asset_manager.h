@@ -3,6 +3,7 @@
 #include "ignis/assets/material.h"
 #include "ignis/assets/mesh.h"
 #include "ignis/assets/texture.h"
+#include "ignis/core/result.h"
 
 #include <memory>
 #include <string>
@@ -24,9 +25,10 @@ class AssetManager {
 public:
     AssetManager() = default;
 
-    // Raw bytes of any file (disk first, then pak override if set).
-    bool read_file(const std::string& path, std::vector<u8>& out_bytes);
-    bool read_text(const std::string& path, std::string& out_text);
+    // Raw bytes of any file: pak entry wins when a pak is set and contains
+    // the path, otherwise the file is read from disk.
+    Result<std::vector<u8>> read_file(const std::string& path);
+    Result<std::string> read_text(const std::string& path);
 
     std::shared_ptr<Model> load_model(const std::string& path);    // .gltf/.glb
     std::shared_ptr<Texture> load_texture(const std::string& path); // .png/.jpg/.hdr/...

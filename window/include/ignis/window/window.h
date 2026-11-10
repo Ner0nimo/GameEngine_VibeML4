@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ignis/core/result.h"
 #include "ignis/core/types.h"
 
 #include <functional>
@@ -17,6 +18,11 @@ struct WindowProps {
     bool visible = true;
 };
 
+struct FramebufferSize {
+    u32 width = 0;
+    u32 height = 0;
+};
+
 // Thin GLFW wrapper. The window is created with GLFW_NO_API (Vulkan); the
 // renderer owns the swapchain.
 class Window {
@@ -27,7 +33,7 @@ public:
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
 
-    bool init(std::string& err);
+    Result<void> init();
     void shutdown();
     bool is_initialized() const { return window_ != nullptr; }
 
@@ -38,7 +44,7 @@ public:
     GLFWwindow* handle() const { return window_; }
     u32 width() const { return props_.width; }
     u32 height() const { return props_.height; }
-    void framebuffer_size(u32& w, u32& h) const;
+    FramebufferSize framebuffer_size() const;
     f64 time() const { return time_; }
     f32 delta_time() const { return dt_; }
 
@@ -52,7 +58,7 @@ public:
 #if defined(IGNIS_WINDOW_VULKAN)
     // Creates a VkSurfaceKHR for this window. `instance` is a VkInstance.
     // Returned as void* to keep vulkan.h out of this header.
-    void* create_vulkan_surface(void* instance, std::string& err);
+    Result<void*> create_vulkan_surface(void* instance);
 #endif
 
 private:

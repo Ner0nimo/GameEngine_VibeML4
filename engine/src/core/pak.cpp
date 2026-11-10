@@ -1,7 +1,5 @@
 #include "ignis/core/pak.h"
 
-#include "ignis/core/log.h"
-
 #include <array>
 #include <cstring>
 #include <fstream>
@@ -94,19 +92,17 @@ void PakWriter::add_file(const std::string& pak_path, const std::vector<u8>& dat
     entries_.push_back({pak_path, data});
 }
 
-void PakWriter::add_file_from_disk(const std::string& pak_path, const std::string& disk_path) {
+Result<void> PakWriter::add_file_from_disk(const std::string& pak_path, const std::string& disk_path) {
     std::ifstream f(disk_path, std::ios::binary);
-    if (!f) {
-        IGNIS_ERROR("PakWriter: cannot read '{}'", disk_path);
-        return;
-    }
+    if (!f) return Result<void>::failure("PakWriter: cannot read '" + disk_path + "'");
     std::ostringstream ss;
     ss << f.rdbuf();
     const std::string s = ss.str();
     add_file(pak_path, std::vector<u8>(s.begin(), s.end()));
+    return Result<void>::success();
 }
 
-bool PakWriter::write(const std::string& out_path) const {
+Result<void> PakWriter::write(const std::string& out_path) const {
     nlohmann::json index = nlohmann::json::object();
     index["files"] = nlohmann::json::object();
 
@@ -132,10 +128,7 @@ bool PakWriter::write(const std::string& out_path) const {
     }
 
     std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
-    if (!f) {
-        IGNIS_ERROR("PakWriter: cannot write '{}'", out_path);
-        return false;
-    }
+    if (!f) return Result<void>::failure("PakWriter: cannot write '" + out_path + "'");
     f.write("IGPK", 4);
     const std::string index_str = index.dump();
     const u32 index_size = static_cast<u32>(index_str.size());
@@ -145,25 +138,27 @@ bool PakWriter::write(const std::string& out_path) const {
         f.write(reinterpret_cast<const char*>(e.data.data()),
                 static_cast<std::streamsize>(e.data.size()));
     }
-    return f.good();
+    if (!f.good()) return Result<void>::failure("PakWriter: write failed for '" + out_path + "'");
+    return Result<void>::success();
 }
 
 // --- PakReader ---------------------------------------------------------------
 
-bool PakReader::open(const std::string& path) {
+Result<void> PakReader::open(const std::string& path) {
     is_open_ = false;
     index_.clear();
     std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
+    if (!f) return Result<void>::failure("cannot open pak '" + path + "'");
     char magic[4] = {};
     f.read(magic, 4);
-    if (!f || std::memcmp(magic, "IGPK", 4) != 0) return false;
+    if (!f || std::memcmp(magic, "IGPK", 4) != 0)
+        return Result<void>::failure("bad magic in pak '" + path + "' (not IGPK)");
     u32 index_size = 0;
     f.read(reinterpret_cast<char*>(&index_size), 4);
-    if (!f) return false;
+    if (!f) return Result<void>::failure("truncated pak header in '" + path + "'");
     std::string index_str(index_size, '\0');
     f.read(index_str.data(), static_cast<std::streamsize>(index_size));
-    if (!f) return false;
+    if (!f) return Result<void>::failure("truncated pak index in '" + path + "'");
     try {
         auto j = nlohmann::json::parse(index_str);
         for (auto& [name, meta] : j["files"].items()) {
@@ -174,33 +169,31 @@ bool PakReader::open(const std::string& path) {
             index_[name] = e;
         }
     } catch (const std::exception& e) {
-        IGNIS_ERROR("PakReader: bad index in '{}': {}", path, e.what());
-        return false;
+        return Result<void>::failure("bad index in '" + path + "': " + e.what());
     }
     file_path_ = path;
     is_open_ = true;
-    return true;
+    return Result<void>::success();
 }
 
 bool PakReader::has(const std::string& pak_path) const {
     return is_open_ && index_.contains(pak_path);
 }
 
-bool PakReader::read(const std::string& pak_path, std::vector<u8>& out) const {
-    if (!is_open_) return false;
+Result<std::vector<u8>> PakReader::read(const std::string& pak_path) const {
+    if (!is_open_) return Result<std::vector<u8>>::failure("pak not open");
     auto it = index_.find(pak_path);
-    if (it == index_.end()) return false;
+    if (it == index_.end())
+        return Result<std::vector<u8>>::failure("no entry '" + pak_path + "' in pak");
     std::ifstream f(file_path_, std::ios::binary);
-    if (!f) return false;
+    if (!f) return Result<std::vector<u8>>::failure("cannot reopen pak file '" + file_path_ + "'");
     f.seekg(static_cast<std::streamoff>(it->second.offset));
-    out.resize(it->second.size);
+    std::vector<u8> out(it->second.size);
     f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size()));
-    if (!f) return false;
-    if (!it->second.sha256.empty() && sha256_hex(out) != it->second.sha256) {
-        IGNIS_ERROR("PakReader: sha256 mismatch for '{}'", pak_path);
-        return false;
-    }
-    return true;
+    if (!f) return Result<std::vector<u8>>::failure("short read for '" + pak_path + "'");
+    if (!it->second.sha256.empty() && sha256_hex(out) != it->second.sha256)
+        return Result<std::vector<u8>>::failure("sha256 mismatch for '" + pak_path + "'");
+    return Result<std::vector<u8>>::success(std::move(out));
 }
 
 std::vector<std::string> PakReader::list() const {

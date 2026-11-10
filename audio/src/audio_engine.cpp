@@ -1,8 +1,12 @@
 #include "ignis/audio/audio_engine.h"
 
+#include "ignis/assets/asset_manager.h"
 #include "ignis/core/log.h"
 
 #include "lua_all.h"
+
+#include <fstream>
+#include <iterator>
 
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
@@ -64,7 +68,7 @@ AudioEngine::~AudioEngine() {
     shutdown();
 }
 
-bool AudioEngine::init(bool null_device, std::string& err) {
+Result<void> AudioEngine::init(bool null_device) {
     shutdown();
     null_device_ = null_device;
 
@@ -97,15 +101,15 @@ bool AudioEngine::init(bool null_device, std::string& err) {
         null_device_ = true;
     }
     if (res != MA_SUCCESS) {
-        err = "ma_engine_init failed: " + std::to_string(static_cast<int>(res));
+        std::string err = "ma_engine_init failed: " + std::to_string(static_cast<int>(res));
         delete engine_;
         engine_ = nullptr;
-        return false;
+        return Result<void>::failure(err);
     }
     initialized_ = true;
     active_ = this;
     IGNIS_INFO("AudioEngine initialized ({})", null_device_ ? "null device" : "audio device");
-    return true;
+    return Result<void>::success();
 }
 
 void AudioEngine::shutdown() {
@@ -124,40 +128,117 @@ void AudioEngine::shutdown() {
     if (active_ == this) active_ = nullptr;
 }
 
-u32 AudioEngine::play(const std::string& path, f32 volume, bool loop) {
-    if (!initialized_ || !engine_) return 0;
-    auto* sound = new ma_sound();
-    const ma_result res = ma_sound_init_from_file(engine_, path.c_str(), 0, nullptr, nullptr, sound);
-    if (res != MA_SUCCESS) {
-        IGNIS_WARN("AudioEngine: cannot play '{}' (ma_result {})", path, static_cast<int>(res));
-        delete sound;
-        return 0;
+Result<u32> AudioEngine::play(const std::string& path, f32 volume, bool loop) {
+    if (!initialized_ || !engine_)
+        return Result<u32>::failure("audio engine not initialized");
+    // All playback goes through an in-memory decoder: this makes sounds work
+    // identically from disk and from inside an exported .ignispak (via the
+    // AssetManager), and keeps is_playing() reliable on null devices.
+    // The encoded bytes are held by the decoder; PCM is decoded on the fly.
+    std::vector<u8> bytes;
+    if (assets_) {
+        auto r = assets_->read_file(path);
+        if (!r.ok() || r.value().empty())
+            return Result<u32>::failure("cannot read '" + path + "': " + r.error());
+        bytes = std::move(r.value());
+    } else {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return Result<u32>::failure("cannot open '" + path + "'");
+        bytes.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
+    return play_memory(bytes.data(), bytes.size(), volume, loop);
+}
+
+Result<u32> AudioEngine::play_memory(const void* data, size_t size, f32 volume, bool loop) {
+    if (!initialized_ || !engine_ || !data || size == 0)
+        return Result<u32>::failure("audio engine not initialized or empty data");
+    // The sound references but does not own the decoder, so we keep it alive
+    // next to the sound and release both together in stop().
+    auto* decoder = new ma_decoder();
+    if (ma_decoder_init_memory(data, size, nullptr, decoder) != MA_SUCCESS) {
+        delete decoder;
+        return Result<u32>::failure("cannot decode audio data");
+    }
+    auto* sound = new ma_sound();
+    if (ma_sound_init_from_data_source(engine_, reinterpret_cast<ma_data_source*>(decoder),
+                                       0, nullptr, sound) != MA_SUCCESS) {
+        ma_decoder_uninit(decoder);
+        delete decoder;
+        delete sound;
+        return Result<u32>::failure("ma_sound_init_from_data_source failed");
+    }
+    ma_sound_start(sound);
     ma_sound_set_volume(sound, volume);
     ma_sound_set_looping(sound, loop ? MA_TRUE : MA_FALSE);
     const u32 id = next_id_++;
-    sounds_[id] = sound;
-    return id;
+    sounds_[id] = SoundEntry{sound, decoder};
+    return Result<u32>::success(id);
 }
 
 void AudioEngine::stop(u32 sound_id) {
     auto it = sounds_.find(sound_id);
     if (it == sounds_.end()) return;
-    ma_sound_stop(it->second);
-    ma_sound_uninit(it->second);
+    ma_sound_stop(it->second.sound);
+    ma_sound_uninit(it->second.sound);
+    if (it->second.decoder) {
+        ma_decoder_uninit(it->second.decoder);
+        delete it->second.decoder;
+    }
+    delete it->second.sound;
     sounds_.erase(it);
 }
 
 void AudioEngine::stop_all() {
-    for (auto& [id, sound] : sounds_) {
-        ma_sound_stop(sound);
-        ma_sound_uninit(sound);
+    for (auto& [id, entry] : sounds_) {
+        ma_sound_stop(entry.sound);
+        ma_sound_uninit(entry.sound);
+        if (entry.decoder) {
+            ma_decoder_uninit(entry.decoder);
+            delete entry.decoder;
+        }
+        delete entry.sound;
     }
     sounds_.clear();
 }
 
 void AudioEngine::set_master_volume(f32 v) {
     if (engine_) ma_engine_set_volume(engine_, v);
+}
+
+bool AudioEngine::is_playing(u32 sound_id) const {
+    auto it = sounds_.find(sound_id);
+    if (it == sounds_.end()) return false;
+    return ma_sound_is_playing(it->second.sound) == MA_TRUE;
+}
+
+void AudioEngine::set_sound_volume(u32 sound_id, f32 v) {
+    auto it = sounds_.find(sound_id);
+    if (it != sounds_.end()) ma_sound_set_volume(it->second.sound, v);
+}
+
+void AudioEngine::set_sound_pitch(u32 sound_id, f32 pitch) {
+    auto it = sounds_.find(sound_id);
+    if (it != sounds_.end()) ma_sound_set_pitch(it->second.sound, pitch);
+}
+
+void AudioEngine::set_sound_position(u32 sound_id, math::Vec3 pos) {
+    auto it = sounds_.find(sound_id);
+    if (it != sounds_.end()) ma_sound_set_position(it->second.sound, pos.x, pos.y, pos.z);
+}
+
+void AudioEngine::set_sound_spatial(u32 sound_id, bool enabled, f32 min_distance, f32 max_distance) {
+    auto it = sounds_.find(sound_id);
+    if (it == sounds_.end()) return;
+    ma_sound_set_spatialization_enabled(it->second.sound, enabled ? MA_TRUE : MA_FALSE);
+    ma_sound_set_attenuation_model(it->second.sound, ma_attenuation_model_inverse);
+    ma_sound_set_min_distance(it->second.sound, min_distance);
+    ma_sound_set_max_distance(it->second.sound, max_distance);
+}
+
+void AudioEngine::set_listener(math::Vec3 pos, math::Vec3 forward) {
+    if (!engine_) return;
+    ma_engine_listener_set_position(engine_, 0, pos.x, pos.y, pos.z);
+    ma_engine_listener_set_direction(engine_, 0, forward.x, forward.y, forward.z);
 }
 
 // --- Lua bindings --------------------------------------------------------------
@@ -176,7 +257,12 @@ int l_audio_play(lua_State* L) {
     f32 volume = static_cast<f32>(luaL_optnumber(L, 2, 1.0));
     bool loop = lua_toboolean(L, 3) != 0;
     AudioEngine* e = engine_from_lua(L);
-    lua_pushinteger(L, e ? static_cast<lua_Integer>(e->play(path, volume, loop)) : 0);
+    if (!e) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    auto r = e->play(path, volume, loop);
+    lua_pushinteger(L, r.ok() ? static_cast<lua_Integer>(r.value()) : 0);
     return 1;
 }
 

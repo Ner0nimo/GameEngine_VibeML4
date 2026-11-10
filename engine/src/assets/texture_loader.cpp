@@ -10,11 +10,12 @@
 namespace ignis {
 
 std::shared_ptr<Texture> AssetManager::load_texture_impl(const std::string& path) {
-    std::vector<u8> bytes;
-    if (!read_file(path, bytes)) {
-        IGNIS_ERROR("load_texture: cannot read '{}'", path);
+    auto bytes_r = read_file(path);
+    if (!bytes_r.ok()) {
+        IGNIS_ERROR("load_texture: {}", bytes_r.error());
         return nullptr;
     }
+    const std::vector<u8>& bytes = bytes_r.value();
 
     auto tex = std::make_shared<Texture>();
     tex->name = path;

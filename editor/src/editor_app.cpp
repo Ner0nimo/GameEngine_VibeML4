@@ -59,95 +59,117 @@ void check_vk(VkResult r) {
 } // namespace
 
 int EditorApp::run(const std::string& scene_path, const std::string& commands_path) {
-    // Probe the Vulkan stack in a forked child first (some driver stacks crash
-    // inside NVRHI dispatcher calls - fail with a message, not a segfault).
-    {
-        auto probe = []() -> bool {
-            const pid_t pid = fork();
-            if (pid == 0) {
-                VulkanRenderer probeRenderer;
-                std::string probeErr;
-                if (!probeRenderer.init_offscreen(64, 64, probeErr)) _exit(2);
-                probeRenderer.shutdown();
-                _exit(0);
-            }
-            int status = 0;
-            waitpid(pid, &status, 0);
-            return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-        };
-        if (!probe()) {
-            IGNIS_ERROR("Vulkan/NVRHI device not usable on this system (driver crash or no GPU). "
-                        "Run the runtime with --headless for simulation-only mode.");
-            return 1;
-        }
+    // Top-level orchestrator: every phase below is one function, one level of
+    // abstraction. Failures are reported here, at the topmost level.
+    if (!probe_vulkan_device()) {
+        IGNIS_ERROR("Vulkan/NVRHI device not usable on this system (driver crash or no GPU). "
+                    "Run the runtime with --headless for simulation-only mode.");
+        return 1;
     }
+    if (auto r = init_window_and_renderer(); !r.ok()) {
+        IGNIS_ERROR("{}", r.error());
+        return 1;
+    }
+    if (auto r = init_scene_and_systems(scene_path, commands_path); !r.ok()) {
+        IGNIS_ERROR("{}", r.error());
+        return 1;
+    }
+    if (auto r = init_imgui_ui(); !r.ok()) {
+        IGNIS_ERROR("ImGui UI init failed: {}", r.error());
+        return 1;
+    }
+    main_loop(scene_path);
+    shutdown_ui();
+    IGNIS_INFO("editor shut down cleanly");
+    return 0;
+}
 
-    std::string err;
+// Probe the Vulkan stack in a forked child first (some driver stacks crash
+// inside NVRHI dispatcher calls - fail with a message, not a segfault). This
+// is the topmost place where that dishonesty is handled.
+bool EditorApp::probe_vulkan_device() {
+    const pid_t pid = fork();
+    if (pid == 0) {
+        VulkanRenderer probeRenderer;
+        if (!probeRenderer.init_offscreen(64, 64).ok()) _exit(2);
+        probeRenderer.shutdown();
+        _exit(0);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
 
-    // --- window + renderer ----------------------------------------------------
+Result<void> EditorApp::init_window_and_renderer() {
     WindowProps props;
     props.title = "Ignis Editor";
     props.width = 1280;
     props.height = 720;
     props.resizable = false; // windowed swapchain recreation is not implemented yet
     window_ = std::make_unique<Window>(props);
-    if (!window_->init(err)) {
-        IGNIS_ERROR("window init failed: {}", err);
-        return 1;
-    }
+    if (auto r = window_->init(); !r.ok())
+        return Result<void>::failure("window init failed: " + r.error());
 
     assets_ = std::make_unique<AssetManager>();
     renderer_ = std::make_unique<VulkanRenderer>();
     renderer_->set_asset_manager(assets_.get());
-    if (!renderer_->init(window_.get(), err)) {
-        IGNIS_ERROR("renderer init failed: {}", err);
-        return 1;
-    }
+    if (auto r = renderer_->init(window_.get()); !r.ok())
+        return Result<void>::failure("renderer init failed: " + r.error());
+    return Result<void>::success();
+}
 
-    // --- scene + systems ------------------------------------------------------
+Result<void> EditorApp::init_scene_and_systems(const std::string& scene_path,
+                                               const std::string& commands_path) {
     scene_ = std::make_unique<Scene>();
     register_builtin_components(scene_->world());
     PhysicsSystem::register_components(scene_->world());
-    if (!scene_->load_file(scene_path)) {
-        IGNIS_ERROR("cannot load scene '{}'", scene_path);
-        return 1;
-    }
+    AudioSystem::register_components(scene_->world());
+    if (auto r = scene_->load_file(scene_path); !r.ok())
+        return Result<void>::failure(r.error());
 
     scripts_ = std::make_unique<ScriptEngine>();
-    if (!scripts_->init(scene_.get(), assets_.get(), err)) {
-        IGNIS_ERROR("script engine init failed: {}", err);
-        return 1;
-    }
+    if (auto r = scripts_->init(scene_.get(), assets_.get()); !r.ok())
+        return Result<void>::failure("script engine init failed: " + r.error());
     audio_ = std::make_unique<AudioEngine>();
-    audio_->init(false, err); // real audio device in the editor
+    if (auto r = audio_->init(false); !r.ok()) // real audio device in the editor
+        IGNIS_WARN("audio init failed ({}), continuing silent", r.error());
+    audio_->set_asset_manager(assets_.get()); // pak-aware playback
     AudioEngine::register_lua_bindings(scripts_->state());
+    audio_sys_ = std::make_unique<AudioSystem>(*audio_, scene_.get());
+    AudioSystem::register_lua_bindings(scripts_->state());
     physics_ = std::make_unique<PhysicsSystem>(*scene_);
-    if (!physics_->init({0.f, -9.81f, 0.f}, &err)) {
-        IGNIS_ERROR("physics init failed: {}", err);
-        return 1;
-    }
+    if (auto r = physics_->init({0.f, -9.81f, 0.f}); !r.ok())
+        return Result<void>::failure("physics init failed: " + r.error());
     PhysicsSystem::register_lua_bindings(scripts_->state());
     scene_->add_system([&](World&, f32 dt) { scripts_->update(dt); });
     scene_->add_system([&](World& w, f32 dt) { physics_->update(w, dt); });
+    scene_->add_system([&](World& w, f32 dt) { audio_sys_->update(w, dt); });
 
-    // --- agent commands (AI-controllable) --------------------------------------
+    // Agent commands (AI-controllable).
     commands_ = std::make_unique<CommandProcessor>(*scene_, *assets_);
     if (!commands_path.empty()) {
         auto results = commands_->execute_file(commands_path);
         for (const auto& r : results) IGNIS_INFO("cmd: {} ({})", r.message, r.ok ? "ok" : "FAIL");
     }
+    return Result<void>::success();
+}
 
-    // --- ImGui on raw Vulkan ----------------------------------------------------
+Result<void> EditorApp::init_imgui_ui() {
+    // ImGui pass on the swapchain image: render pass with loadOp=LOAD,
+    // initial layout PRESENT_SRC_KHR (what NVRHI leaves the image in).
     const RawVulkanHandles rh = renderer_->raw_handles();
     const VkInstance instance = static_cast<VkInstance>(rh.instance);
     const VkPhysicalDevice phys = static_cast<VkPhysicalDevice>(rh.physical_device);
-    const VkDevice device = static_cast<VkDevice>(rh.device);
-    const VkQueue queue = static_cast<VkQueue>(rh.queue);
+    ui_.device = static_cast<VkDevice>(rh.device);
+    ui_.queue = static_cast<VkQueue>(rh.queue);
+    VkDevice& device = ui_.device;
+    VkQueue& queue = ui_.queue;
     const VkSwapchainKHR swapchain = static_cast<VkSwapchainKHR>(rh.swapchain);
     const VkFormat swapFormat = static_cast<VkFormat>(rh.swap_format);
     u32 imageCount = rh.swap_image_count;
     std::vector<VkImage> swapImages(imageCount);
     vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapImages.data());
+    ui_.image_count = imageCount;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -157,7 +179,6 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
     ImGui_ImplGlfw_InitForVulkan(window_->handle(), true);
     ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, imgui_vk_loader, instance);
 
-    VkDescriptorPool imguiPool = VK_NULL_HANDLE;
     {
         const VkDescriptorPoolSize sizes[] = {
             {VK_DESCRIPTOR_TYPE_SAMPLER, 1000},
@@ -178,13 +199,13 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
         ci.maxSets = 1000;
         ci.poolSizeCount = static_cast<u32>(sizeof(sizes) / sizeof(sizes[0]));
         ci.pPoolSizes = sizes;
-        vkCreateDescriptorPool(device, &ci, nullptr, &imguiPool);
+        vkCreateDescriptorPool(device, &ci, nullptr, &ui_.pool);
     }
 
     // UI render pass: loads the scene-rendered swapchain image (NVRHI leaves
     // it in PRESENT_SRC_KHR thanks to keepInitialState) and keeps it there.
-    VkRenderPass uiRenderPass = VK_NULL_HANDLE;
     {
+        VkRenderPass& uiRenderPass = ui_.render_pass;
         VkAttachmentDescription att{};
         att.format = swapFormat;
         att.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -210,8 +231,9 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
         vkCreateRenderPass(device, &ci, nullptr, &uiRenderPass);
     }
 
-    std::vector<VkImageView> uiViews(imageCount);
-    std::vector<VkFramebuffer> uiFBs(imageCount);
+    ui_.views.resize(imageCount);
+    ui_.fbs.resize(imageCount);
+    VkRenderPass& uiRenderPass = ui_.render_pass;
     for (u32 i = 0; i < imageCount; ++i) {
         VkImageViewCreateInfo vi{};
         vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -221,32 +243,30 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
         vi.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                          VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
         vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        vkCreateImageView(device, &vi, nullptr, &uiViews[i]);
+        vkCreateImageView(device, &vi, nullptr, &ui_.views[i]);
         VkFramebufferCreateInfo fi{};
         fi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         fi.renderPass = uiRenderPass;
         fi.attachmentCount = 1;
-        fi.pAttachments = &uiViews[i];
+        fi.pAttachments = &ui_.views[i];
         fi.width = rh.width;
         fi.height = rh.height;
         fi.layers = 1;
-        vkCreateFramebuffer(device, &fi, nullptr, &uiFBs[i]);
+        vkCreateFramebuffer(device, &fi, nullptr, &ui_.fbs[i]);
     }
 
-    VkCommandPool uiPool = VK_NULL_HANDLE;
-    VkCommandBuffer uiCB = VK_NULL_HANDLE;
     {
         VkCommandPoolCreateInfo ci{};
         ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         ci.queueFamilyIndex = rh.queue_family;
-        vkCreateCommandPool(device, &ci, nullptr, &uiPool);
+        vkCreateCommandPool(device, &ci, nullptr, &ui_.cmd_pool);
         VkCommandBufferAllocateInfo ai{};
         ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        ai.commandPool = uiPool;
+        ai.commandPool = ui_.cmd_pool;
         ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         ai.commandBufferCount = 1;
-        vkAllocateCommandBuffers(device, &ai, &uiCB);
+        vkAllocateCommandBuffers(device, &ai, &ui_.cmd_buffer);
     }
 
     ImGui_ImplVulkan_InitInfo imguiInfo{};
@@ -256,15 +276,20 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
     imguiInfo.Device = device;
     imguiInfo.QueueFamily = rh.queue_family;
     imguiInfo.Queue = queue;
-    imguiInfo.DescriptorPool = imguiPool;
+    imguiInfo.DescriptorPool = ui_.pool;
     imguiInfo.MinImageCount = 2;
     imguiInfo.ImageCount = imageCount;
     imguiInfo.UseDynamicRendering = false;
-    imguiInfo.PipelineInfoMain.RenderPass = uiRenderPass;
+    imguiInfo.PipelineInfoMain.RenderPass = ui_.render_pass;
     imguiInfo.PipelineInfoMain.Subpass = 0;
     imguiInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     imguiInfo.CheckVkResultFn = check_vk;
     ImGui_ImplVulkan_Init(&imguiInfo); // font texture is created lazily on first NewFrame
+    return Result<void>::success();
+}
+
+void EditorApp::main_loop(const std::string& scene_path) {
+    ImGuiIO& io = ImGui::GetIO();
 
     // --- editor state -----------------------------------------------------------
     Camera camera;
@@ -341,14 +366,13 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
             // Click to select (ray vs. mesh AABBs), unless the click went to the UI.
             const bool lmb = glfwGetMouseButton(glfw, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
             if (lmb && !leftClicked && !io.WantCaptureMouse) {
-                u32 fw = 0, fh = 0;
-                window_->framebuffer_size(fw, fh);
-                if (fw > 0 && fh > 0) {
-                    const f32 ndcX = (static_cast<f32>(mx) / static_cast<f32>(fw)) * 2.f - 1.f;
-                    const f32 ndcY = (static_cast<f32>(my) / static_cast<f32>(fh)) * 2.f - 1.f;
-                    math::Vec3 o, d;
-                    picking::screen_ray(camera, static_cast<f32>(fw) / static_cast<f32>(fh),
-                                        ndcX, -ndcY, o, d);
+                const FramebufferSize fb = window_->framebuffer_size();
+                if (fb.width > 0 && fb.height > 0) {
+                    const f32 ndcX = (static_cast<f32>(mx) / static_cast<f32>(fb.width)) * 2.f - 1.f;
+                    const f32 ndcY = (static_cast<f32>(my) / static_cast<f32>(fb.height)) * 2.f - 1.f;
+                    const picking::Ray ray = picking::screen_ray(
+                        camera, static_cast<f32>(fb.width) / static_cast<f32>(fb.height),
+                        ndcX, -ndcY);
                     f32 bestT = 1e30f;
                     EntityId best = NULL_ENTITY;
                     for (EntityId e : scene_->world().all_entities()) {
@@ -359,9 +383,9 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
                         const math::Vec3 center{static_cast<f32>(wm[3][0]), static_cast<f32>(wm[3][1]),
                                                 static_cast<f32>(wm[3][2])};
                         const math::Vec3 half = tc->scale * 0.5f;
-                        const f32 t = picking::ray_aabb(o, d, center, half);
-                        if (t > 0.f && t < bestT) {
-                            bestT = t;
+                        const auto t = picking::ray_aabb(ray.origin, ray.dir, center, half);
+                        if (t.has_value() && *t < bestT) {
+                            bestT = *t;
                             best = e;
                         }
                     }
@@ -381,8 +405,8 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
                 if (ImGui::MenuItem("Save scene", "Ctrl+S")) {
-                    if (scene_->save_to_file(scene_path)) IGNIS_INFO("scene saved to {}", scene_path);
-                    else IGNIS_ERROR("cannot save scene to {}", scene_path);
+                    if (auto r = scene_->save_to_file(scene_path); r.ok()) IGNIS_INFO("scene saved to {}", scene_path);
+                    else IGNIS_ERROR("{}", r.error());
                 }
                 if (ImGui::MenuItem("Quit", "Esc")) window_->request_close();
                 ImGui::EndMenu();
@@ -395,7 +419,8 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
             ImGui::EndMainMenuBar();
         }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) {
-            if (scene_->save_to_file(scene_path)) IGNIS_INFO("scene saved to {}", scene_path);
+            if (auto r = scene_->save_to_file(scene_path); r.ok()) IGNIS_INFO("scene saved to {}", scene_path);
+            else IGNIS_ERROR("{}", r.error());
         }
         if (ImGui::IsKeyPressed(ImGuiKey_P)) playing_ = !playing_;
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) window_->request_close();
@@ -487,15 +512,17 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
         // --- ImGui overlay pass on the swapchain image ------------------------------
         const RawVulkanHandles rhNow = renderer_->raw_handles();
         const u32 swapIndex = rhNow.swap_index;
-        vkResetCommandPool(device, uiPool, 0);
+        VkDevice device = ui_.device;
+        vkResetCommandPool(device, ui_.cmd_pool, 0);
+        VkCommandBuffer uiCB = ui_.cmd_buffer;
         VkCommandBufferBeginInfo bi{};
         bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(uiCB, &bi);
         VkRenderPassBeginInfo rpi{};
         rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rpi.renderPass = uiRenderPass;
-        rpi.framebuffer = uiFBs[swapIndex];
+        rpi.renderPass = ui_.render_pass;
+        rpi.framebuffer = ui_.fbs[swapIndex];
         rpi.renderArea.offset = {0, 0};
         rpi.renderArea.extent = {rhNow.width, rhNow.height};
         vkCmdBeginRenderPass(uiCB, &rpi, VK_SUBPASS_CONTENTS_INLINE);
@@ -506,26 +533,26 @@ int EditorApp::run(const std::string& scene_path, const std::string& commands_pa
         si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.commandBufferCount = 1;
         si.pCommandBuffers = &uiCB;
-        vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+        vkQueueSubmit(ui_.queue, 1, &si, VK_NULL_HANDLE);
 
         renderer_->present();
     }
+}
 
-    // --- shutdown -----------------------------------------------------------------
+void EditorApp::shutdown_ui() {
     renderer_->shutdown(); // waits for idle internally
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
-    vkDestroyCommandPool(device, uiPool, nullptr);
-    for (u32 i = 0; i < imageCount; ++i) {
-        vkDestroyFramebuffer(device, uiFBs[i], nullptr);
-        vkDestroyImageView(device, uiViews[i], nullptr);
+    const VkDevice device = ui_.device;
+    vkDestroyCommandPool(device, ui_.cmd_pool, nullptr);
+    for (u32 i = 0; i < ui_.image_count; ++i) {
+        vkDestroyFramebuffer(device, ui_.fbs[i], nullptr);
+        vkDestroyImageView(device, ui_.views[i], nullptr);
     }
-    vkDestroyRenderPass(device, uiRenderPass, nullptr);
-    vkDestroyDescriptorPool(device, imguiPool, nullptr);
+    vkDestroyRenderPass(device, ui_.render_pass, nullptr);
+    vkDestroyDescriptorPool(device, ui_.pool, nullptr);
     window_->shutdown();
-    IGNIS_INFO("editor shut down cleanly");
-    return 0;
 }
 
 #endif // IGNIS_WITH_GRAPHICS

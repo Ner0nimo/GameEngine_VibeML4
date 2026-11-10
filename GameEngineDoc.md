@@ -10,10 +10,11 @@ We're building a production-grade, simple and straight-forward 3D Game Engine fo
   prefabs, glTF assets, pak export format, JSON agent-command API), Lua 5.4
   scripting with full ECS bindings, reactphysics3d physics (rigid bodies,
   colliders, raycast, collision events), miniaudio audio (null-device headless
-  mode), GLFW window + NVRHI/Vulkan renderer (compile-verified; PBR/IBL/
+  mode, AudioSource component + AudioSystem with spatial 3D audio and
+  pak-aware playback), GLFW window + NVRHI/Vulkan renderer (compile-verified; PBR/IBL/
   shadows/SSAO/HDR-tonemap passes), headless runtime (`--headless`, `--pak`),
-  `ignis_export` packaging tool, editor skeleton (graphics builds).
-- Tests: 35 GTest cases incl. an integration test that runs
+  `ignis_export` packaging tool, editor (window + renderer + ImGui UI + agent commands).
+- Tests: 43 GTest cases incl. an integration test that runs
   `scenes/test_scene.scene.json` headless and exercises scripting, physics,
   audio, prefabs, entity destruction and agent commands. CI: `.github/workflows/ci.yml`.
 - Dev guide: `AGENTS.md`; skill: `.vibe/skills/ignis-dev`.

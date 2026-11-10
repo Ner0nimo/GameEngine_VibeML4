@@ -38,7 +38,9 @@ EntityId Scene::spawn_prefab(const std::string& name) {
                 IGNIS_WARN("spawn_prefab: unknown component '{}'", comp_name);
                 continue;
             }
-            info->deserialize(world_, e, comp_json);
+            if (!info->deserialize(world_, e, comp_json)) {
+                IGNIS_WARN("spawn_prefab: bad data for component '{}'", comp_name);
+            }
         }
     }
     return e;
@@ -107,55 +109,45 @@ Scene Scene::deserialize(const nlohmann::json& j) {
         for (const auto& ej : j["entities"]) {
             EntityId id = ej.value("id", 0u);
             EntityId parent = ej.value("parent", 0u);
-            if (parent != 0 && scene.world_.alive(id)) {
-                scene.world_.set_parent(id, parent);
+            if (parent != 0 && scene.world_.alive(id) &&
+                !scene.world_.set_parent(id, parent)) {
+                IGNIS_WARN("deserialize: entity {} has invalid parent {} (dead or cyclic)", id, parent);
             }
         }
     }
     return scene;
 }
 
-bool Scene::save_to_file(const std::string& path) const {
+Result<void> Scene::save_to_file(const std::string& path) const {
     std::ofstream f(path);
-    if (!f) return false;
+    if (!f) return Result<void>::failure("cannot open '" + path + "' for writing");
     f << serialize().dump(2);
-    return f.good();
+    if (!f.good()) return Result<void>::failure("write failed for '" + path + "'");
+    return Result<void>::success();
 }
 
-Scene Scene::load_from_file(const std::string& path, bool& ok) {
+Result<Scene> Scene::load_from_file(const std::string& path) {
     std::ifstream f(path);
-    if (!f) {
-        ok = false;
-        return Scene{};
-    }
+    if (!f) return Result<Scene>::failure("cannot open scene '" + path + "'");
     std::stringstream ss;
     ss << f.rdbuf();
     try {
-        Scene scene = deserialize(nlohmann::json::parse(ss.str()));
-        ok = true;
-        return scene;
+        return Result<Scene>::success(deserialize(nlohmann::json::parse(ss.str())));
     } catch (const std::exception& e) {
-        IGNIS_ERROR("Failed to parse scene '{}': {}", path, e.what());
-        ok = false;
-        return Scene{};
+        return Result<Scene>::failure("cannot parse scene '" + path + "': " + e.what());
     }
 }
 
-bool Scene::load_file(const std::string& path) {
-    std::ifstream f(path);
-    if (!f) {
-        IGNIS_ERROR("cannot open scene '{}'", path);
-        return false;
-    }
-    std::stringstream ss;
-    ss << f.rdbuf();
-    try {
-        *this = deserialize(nlohmann::json::parse(ss.str()));
-        return true;
-    } catch (const std::exception& e) {
-        IGNIS_ERROR("Failed to parse scene '{}': {}", path, e.what());
-        return false;
-    }
+Result<void> Scene::load_file(const std::string& path) {
+    auto loaded = load_from_file(path);
+    if (!loaded.ok()) return Result<void>::failure(loaded.error());
+    // Load INTO this scene: swap in the parsed world/prefabs/name, keep the
+    // system pipeline (and anything else registered on this object).
+    Scene& tmp = loaded.value();
+    world_ = std::move(tmp.world_);
+    prefabs_ = std::move(tmp.prefabs_);
+    name_ = std::move(tmp.name_);
+    return Result<void>::success();
 }
 
 } // namespace ignis

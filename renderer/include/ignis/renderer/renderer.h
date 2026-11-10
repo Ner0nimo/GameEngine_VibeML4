@@ -1,8 +1,10 @@
 #pragma once
 
+#include "ignis/core/result.h"
 #include "ignis/core/types.h"
 #include "ignis/math/math.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -45,7 +47,7 @@ struct RenderStats {
 class IRenderer {
 public:
     virtual ~IRenderer() = default;
-    virtual bool init(Window* window, std::string& err) = 0;
+    virtual Result<void> init(Window* window) = 0;
     virtual void shutdown() = 0;
     virtual void on_resize(u32 width, u32 height) = 0;
     virtual void render(Scene& scene, const Camera& camera, f32 dt) = 0;
@@ -55,12 +57,15 @@ public:
 
 // CPU-side helpers shared by editor picking and tests.
 namespace picking {
+    struct Ray {
+        math::Vec3 origin{0.f};
+        math::Vec3 dir{0.f, 0.f, -1.f};
+    };
     // Ray from camera through a normalized screen position (x,y in [-1,1]).
-    void screen_ray(const Camera& cam, f32 aspect, f32 ndc_x, f32 ndc_y,
-                    math::Vec3& out_origin, math::Vec3& out_dir);
-    // Ray vs. axis-aligned box (center, half extents); returns distance or -1.
-    f32 ray_aabb(const math::Vec3& origin, const math::Vec3& dir,
-                 const math::Vec3& center, const math::Vec3& half_extents);
+    Ray screen_ray(const Camera& cam, f32 aspect, f32 ndc_x, f32 ndc_y);
+    // Ray vs. axis-aligned box (center, half extents); distance, or nullopt on miss.
+    std::optional<f32> ray_aabb(const math::Vec3& origin, const math::Vec3& dir,
+                                const math::Vec3& center, const math::Vec3& half_extents);
 } // namespace picking
 
 } // namespace ignis

@@ -49,7 +49,8 @@ CommandResult CommandProcessor::execute(const nlohmann::json& cmd) {
         EntityId child = cmd.value("entity", 0u);
         EntityId parent = cmd.value("parent", 0u);
         if (!world.alive(child)) return fail("entity not alive");
-        world.set_parent(child, parent);
+        if (!world.set_parent(child, parent))
+            return fail("invalid parent (dead or would create a cycle)");
         return ok({}, "reparented");
     }
     if (c == "add_component" || c == "set_component") {
@@ -111,7 +112,8 @@ CommandResult CommandProcessor::execute(const nlohmann::json& cmd) {
     }
     if (c == "save_scene") {
         const std::string path = cmd.value("path", "scene.json");
-        if (!scene_.save_to_file(path)) return fail("cannot write '" + path + "'");
+        auto r = scene_.save_to_file(path);
+        if (!r.ok()) return fail(r.error());
         return ok({{"path", path}}, "saved");
     }
     if (c == "load_model") {

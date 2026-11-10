@@ -58,7 +58,7 @@ TEST(Ecs, Hierarchy) {
     register_builtin_components(w);
     EntityId parent = w.create_entity("parent");
     EntityId child = w.create_entity("child");
-    w.set_parent(child, parent);
+    EXPECT_TRUE(w.set_parent(child, parent));
     EXPECT_EQ(w.parent_of(child), parent);
     ASSERT_EQ(w.children_of(parent).size(), 1u);
     EXPECT_EQ(w.children_of(parent)[0], child);
@@ -66,6 +66,33 @@ TEST(Ecs, Hierarchy) {
     // Destroying the parent re-parents the child to root.
     w.destroy_entity(parent);
     EXPECT_EQ(w.parent_of(child), NULL_ENTITY);
+}
+
+TEST(Ecs, SetParentRejectsCyclesAndDead) {
+    World w;
+    register_builtin_components(w);
+    EntityId a = w.create_entity("a");
+    EntityId b = w.create_entity("b");
+    EntityId c = w.create_entity("c");
+    ASSERT_TRUE(w.set_parent(b, a));
+    ASSERT_TRUE(w.set_parent(c, b));
+    // a -> b -> c chain; making a a child of c (or of itself) must fail.
+    EXPECT_FALSE(w.set_parent(a, c));
+    EXPECT_FALSE(w.set_parent(a, a));
+    // Dead parent / dead child must fail and change nothing.
+    EXPECT_FALSE(w.set_parent(a, 999u));
+    EXPECT_FALSE(w.set_parent(999u, a));
+    EXPECT_EQ(w.parent_of(a), NULL_ENTITY);
+    EXPECT_EQ(w.parent_of(c), b);
+    // world_matrix still terminates and is correct.
+    w.emplace<TransformComponent>(a).position = {1.f, 0.f, 0.f};
+    w.emplace<TransformComponent>(b).position = {0.f, 2.f, 0.f};
+    w.emplace<TransformComponent>(c).position = {0.f, 0.f, 3.f};
+    const math::Mat4 m = world_matrix(w, c);
+    const glm::vec4 p = m * glm::vec4(0.f, 0.f, 0.f, 1.f);
+    EXPECT_NEAR(p.x, 1.f, 1e-5f);
+    EXPECT_NEAR(p.y, 2.f, 1e-5f);
+    EXPECT_NEAR(p.z, 3.f, 1e-5f);
 }
 
 TEST(Ecs, WorldMatrix) {
@@ -76,7 +103,7 @@ TEST(Ecs, WorldMatrix) {
     w.emplace<TransformComponent>(parent).position = {10.f, 0.f, 0.f};
     auto& ct = w.emplace<TransformComponent>(child);
     ct.position = {0.f, 5.f, 0.f};
-    w.set_parent(child, parent);
+    EXPECT_TRUE(w.set_parent(child, parent));
     const math::Mat4 m = world_matrix(w, child);
     const glm::vec4 p = m * glm::vec4(0.f, 0.f, 0.f, 1.f);
     EXPECT_NEAR(p.x, 10.f, 1e-5f);
