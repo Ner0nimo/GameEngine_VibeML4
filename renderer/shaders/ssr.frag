@@ -59,7 +59,7 @@ void main() {
         float sz = sceneViewZ(v_uv, depth);
         rt_ssr = vec4(clamp(viewPos.z * 0.05 + 0.5, 0.0, 1.0),
                       clamp(sz * 0.05 + 0.5, 0.0, 1.0),
-                      clamp(Rv.z + 0.5, 0.0, 1.0), 0.0);
+                      clamp(Rv.z + 0.5, 0.0, 1.0), 1.0);
         return;
     }
     vec3 V = normalize(ubo.camPos.xyz - worldPos);
