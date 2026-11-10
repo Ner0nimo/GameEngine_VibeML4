@@ -66,7 +66,7 @@ jobs:
         run: ctest --preset headless-asan --output-on-failure
 
   fuzz:
-    name: Fuzz smoke (pak + scene, ${{ env.FUZZ_SECONDS }}s each)
+    name: Fuzz smoke (pak + scene)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -122,12 +122,12 @@ jobs:
             engine/src scripting/src physics/src audio/src runtime/src tools/exporter/src
 
   dep-pin-audit:
-    name: Dependency pinning audit
+    name: FetchContent pinning audit (cmake/Dependencies.cmake)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # AGENTS.md: deps are pinned via FetchContent GIT_TAG, never branches.
-      - name: Verify every FetchContent dependency is pinned to a tag/commit
+      - name: Verify every FetchContent dependency is pinned to a GIT_TAG (tag/commit, never a branch)
         run: |
           python3 - <<'EOF'
           import re, sys

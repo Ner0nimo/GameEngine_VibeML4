@@ -56,17 +56,34 @@ nlohmann::json lua_to_json_impl(lua_State* L, int idx, int depth,
                     if (lua_geti(L, idx, i) == LUA_TNIL) { lua_pop(L, 1); break; }
                     arr.push_back(lua_to_json_impl(L, -1, depth + 1, visited, entries, error));
                     lua_pop(L, 1);
+                    if (error) return nullptr;
                 }
                 return arr;
             }
             nlohmann::json obj = nlohmann::json::object();
             lua_pushnil(L);
-            while (lua_next(L, idx) != 0) {
-                std::string key = lua_tostring(L, -2);
-                if (key.empty()) key = std::to_string(lua_tointeger(L, -2));
+            while (!error && lua_next(L, idx) != 0) {
+                // Key handling: only string keys and integer keys are supported;
+                // anything else (boolean, table, function, float, ...) is a
+                // controlled error. lua_tostring() may return nullptr for
+                // non-string/non-number keys and mutates number keys in place,
+                // so the key type is checked explicitly first.
+                const int kt = lua_type(L, -2);
+                std::string key;
+                if (kt == LUA_TSTRING) {
+                    const char* ks = lua_tostring(L, -2);
+                    key = ks != nullptr ? ks : "";
+                } else if (kt == LUA_TNUMBER && lua_isinteger(L, -2)) {
+                    key = std::to_string(lua_tointeger(L, -2));
+                } else {
+                    error = true;
+                    lua_pop(L, 2); // value + key
+                    break;
+                }
                 obj[key] = lua_to_json_impl(L, -1, depth + 1, visited, entries, error);
                 lua_pop(L, 1);
             }
+            if (error) return nullptr;
             return obj;
         }
         default: return nullptr;

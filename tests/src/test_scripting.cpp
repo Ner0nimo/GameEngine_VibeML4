@@ -277,3 +277,52 @@ end
     std::filesystem::remove(bad_path);
     std::filesystem::remove(good_path);
 }
+
+TEST(LuaIsolation, StringAndIntegerTableKeysAccepted) {
+    Scene scene("keys_ok");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string path = write_script("ignis_keys_ok.lua", R"LUA(
+function on_create(self)
+    local t = { label = "x", [7] = 1, [42] = "y" } -- string + integer keys
+    ignis.entity.add_component(self.entity, "Transform", t)
+    ignis.entity.create("keys_ok_marker")
+end
+)LUA");
+    EntityId e = scene.world().create_entity("s");
+    scene.world().emplace<ScriptComponent>(e).path = path;
+    scripts.update(0.016f);
+    EXPECT_TRUE(entity_named_exists(scene, "keys_ok_marker")); // conversion did not error
+    std::filesystem::remove(path);
+}
+
+TEST(LuaIsolation, UnsupportedTableKeyTypesAreControlledErrors) {
+    for (const char* bad_key_case : {"[true] = 1", "[{}] = 1", "[1.5] = 1", "[print] = 1"}) {
+        Scene scene("keys_bad");
+        register_builtin_components(scene.world());
+        AssetManager assets;
+        ScriptEngine scripts;
+        ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+        const std::string bad_path = write_script("ignis_keys_bad.lua",
+            std::string("function on_create(self)\n    local t = { ") + bad_key_case +
+            " }\n    ignis.entity.add_component(self.entity, \"Transform\", t)\n    ignis.entity.create(\"should_not_happen\")\nend\n");
+        const std::string good_path = write_script("ignis_keys_good.lua", R"LUA(
+function on_update(self, dt)
+    if ignis.frame() == 2 then
+        ignis.entity.create("engine_still_ok")
+    end
+end
+)LUA");
+        EntityId bad = scene.world().create_entity("bad");
+        scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+        EntityId good = scene.world().create_entity("good");
+        scene.world().emplace<ScriptComponent>(good).path = good_path;
+        for (int i = 0; i < 3; ++i) scripts.update(0.016f); // must not crash
+        EXPECT_FALSE(entity_named_exists(scene, "should_not_happen")) << bad_key_case;
+        EXPECT_TRUE(entity_named_exists(scene, "engine_still_ok")) << bad_key_case;
+        std::filesystem::remove(bad_path);
+        std::filesystem::remove(good_path);
+    }
+}

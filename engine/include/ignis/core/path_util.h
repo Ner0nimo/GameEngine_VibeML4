@@ -23,6 +23,10 @@ inline bool is_unsafe_resource_path(const std::string& p) {
 // True when p resolves (following symlinks, at the filesystem boundary) to a
 // location inside root. Uses weakly_canonical so non-existent leaf components
 // (e.g. a save target) are still checked against the canonicalized prefix.
+// Threat-model note: this is a check-then-open sequence, so it is not atomic
+// against an attacker who can concurrently modify the directory (TOCTOU);
+// it stops accidental and static symlink/traversal escapes, not a hostile
+// process racing the open.
 inline bool is_path_within_root(const std::filesystem::path& root,
                                 const std::filesystem::path& p) {
     std::error_code ec;
