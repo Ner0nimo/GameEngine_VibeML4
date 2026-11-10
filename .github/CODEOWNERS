@@ -1,0 +1,7 @@
+# Default owner for all changes.
+* @Ner0nimo
+
+# Security-sensitive paths: always require owner review.
+.github/workflows/ @Ner0nimo
+.github/dependabot.yml @Ner0nimo
+cmake/Dependencies.cmake @Ner0nimo

@@ -7,6 +7,7 @@
 
 #include <fstream>
 #include <iterator>
+#include <new>
 
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
@@ -37,8 +38,23 @@ static bool decode_impl(const ma_decoder_config* cfg_hint, const char* path,
         ma_decoder_uninit(&decoder);
         return false;
     }
+    // A malformed container header (e.g. a FLAC STREAMINFO total-samples field)
+    // can claim an enormous length; cap the decode buffer so hostile input
+    // cannot trigger a huge allocation.
+    constexpr ma_uint64 kMaxDecodedSamples = 64ull * 1024 * 1024; // 256 MiB of f32
+    const ma_uint64 channels64 = decoder.outputChannels == 0 ? 1 : decoder.outputChannels;
+    if (total_frames > kMaxDecodedSamples / channels64) {
+        ma_decoder_uninit(&decoder);
+        return false;
+    }
     const size_t total_samples = static_cast<size_t>(total_frames) * static_cast<size_t>(decoder.outputChannels);
-    std::vector<f32> buffer(total_samples);
+    std::vector<f32> buffer;
+    try {
+        buffer.resize(total_samples);
+    } catch (const std::bad_alloc&) {
+        ma_decoder_uninit(&decoder);
+        return false;
+    }
     ma_uint64 read_frames = 0;
     res = ma_decoder_read_pcm_frames(&decoder, buffer.data(), total_frames, &read_frames);
     const u32 out_channels = decoder.outputChannels;

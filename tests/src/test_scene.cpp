@@ -299,3 +299,17 @@ TEST(SceneSecurity, MalformedJsonFileRejected) {
     EXPECT_FALSE(scene.load_file(path.string()).ok());
     std::filesystem::remove(path);
 }
+
+TEST(Scene, SpawnPrefabSkipsUnknownAndMalformedComponents) {
+    Scene scene("prefab_robust");
+    register_builtin_components(scene.world());
+    nlohmann::json tpl;
+    tpl["name"] = "Weird";
+    tpl["components"]["Nope"] = nlohmann::json::object();
+    tpl["components"]["Transform"] = "not-an-object";
+    scene.add_prefab("Weird", tpl);
+    EntityId e = scene.spawn_prefab("Weird");
+    ASSERT_NE(e, NULL_ENTITY);
+    EXPECT_EQ(scene.world().name_of(e), "Weird");
+    EXPECT_FALSE(scene.world().has<TransformComponent>(e));
+}

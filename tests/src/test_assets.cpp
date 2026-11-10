@@ -227,3 +227,175 @@ TEST(AssetsSecurity, HugeDimensionImageRejectedBeforeAllocation) {
     EXPECT_EQ(am.load_texture(path.string()), nullptr);
     std::filesystem::remove(path);
 }
+
+namespace {
+
+std::string b64_encode(const std::vector<u8>& buf) {
+    static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string enc;
+    for (size_t i = 0; i < buf.size(); i += 3) {
+        u32 v = static_cast<u32>(buf[i]) << 16;
+        if (i + 1 < buf.size()) v |= static_cast<u32>(buf[i + 1]) << 8;
+        if (i + 2 < buf.size()) v |= static_cast<u32>(buf[i + 2]);
+        enc.push_back(b64[(v >> 18) & 63]);
+        enc.push_back(b64[(v >> 12) & 63]);
+        enc.push_back(i + 1 < buf.size() ? b64[(v >> 6) & 63] : '=');
+        enc.push_back(i + 2 < buf.size() ? b64[v & 63] : '=');
+    }
+    return enc;
+}
+
+fs::path write_tmp_text(const std::string& name, const std::string& content) {
+    const auto p = fs::temp_directory_path() / name;
+    std::ofstream f(p, std::ios::binary);
+    f.write(content.data(), static_cast<std::streamsize>(content.size()));
+    return p;
+}
+
+fs::path write_tmp_bytes(const std::string& name, const std::vector<u8>& bytes) {
+    const auto p = fs::temp_directory_path() / name;
+    std::ofstream f(p, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    return p;
+}
+
+// glTF whose single data-URI buffer holds buffer_bytes, but whose bufferView
+// claims view_len and whose POSITION accessor reads accessor_count vec3s.
+std::string gltf_with_data_buffer(size_t buffer_bytes, size_t view_len, size_t accessor_count) {
+    const std::vector<u8> buf(buffer_bytes, 0);
+    return std::string("{\"asset\":{\"version\":\"2.0\"},"
+        "\"buffers\":[{\"uri\":\"data:application/octet-stream;base64,") + b64_encode(buf) +
+        "\",\"byteLength\":" + std::to_string(buf.size()) + "}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":" + std::to_string(view_len) +
+        ",\"target\":34962}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":" +
+        std::to_string(accessor_count) + ",\"type\":\"VEC3\",\"min\":[0,0,0],\"max\":[1,1,0]}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
+        "\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}],\"scene\":0}";
+}
+
+// glTF with a buffer that has neither a URI nor data (unloaded buffer).
+std::string gltf_no_uri_buffer() {
+    return "{\"asset\":{\"version\":\"2.0\"},"
+        "\"buffers\":[{\"byteLength\":42}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36,\"target\":34962}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
+        "\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}],\"scene\":0}";
+}
+
+// glTF referencing an external buffer file (42 bytes: 3 vec3 positions + 3 u16 indices).
+std::string gltf_external_buffer(const std::string& uri) {
+    return std::string("{\"asset\":{\"version\":\"2.0\"},"
+        "\"buffers\":[{\"uri\":\"") + uri + "\",\"byteLength\":42}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36,\"target\":34962},"
+        "{\"buffer\":0,\"byteOffset\":36,\"byteLength\":6,\"target\":34963}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\",\"min\":[0,0,0],\"max\":[1,1,0]},"
+        "{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1}]}],"
+        "\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}],\"scene\":0}";
+}
+
+} // namespace
+
+TEST(AssetsMalformed, GltfTruncatedJsonReturnsNull) {
+    const auto p = write_tmp_text("ignis_bad_truncated.gltf", "{\"asset\":{\"version\":\"2.0\"}");
+    AssetManager am;
+    EXPECT_EQ(am.load_model(p.string()), nullptr);
+    EXPECT_EQ(am.cache_size(), 0u); // failures must not be cached
+    fs::remove(p);
+}
+
+TEST(AssetsMalformed, GltfBufferViewOutOfBoundsReturnsNullWithoutCrash) {
+    // bufferView claims 12000 bytes, buffer holds 42, accessor reads 1000 vec3:
+    // must be rejected by validation before any accessor unpack read.
+    const auto p = write_tmp_text("ignis_bad_oob.gltf", gltf_with_data_buffer(42, 12000, 1000));
+    AssetManager am;
+    EXPECT_NO_THROW(EXPECT_EQ(am.load_model(p.string()), nullptr));
+    EXPECT_EQ(am.cache_size(), 0u);
+    fs::remove(p);
+}
+
+TEST(AssetsMalformed, GltfUnloadedBufferReturnsNullWithoutThrow) {
+    // Buffer with neither uri nor data: unpack yields nothing; the loader must
+    // turn that into a controlled nullptr, never an escaping exception.
+    const auto p = write_tmp_text("ignis_bad_nobuf.gltf", gltf_no_uri_buffer());
+    AssetManager am;
+    EXPECT_NO_THROW(EXPECT_EQ(am.load_model(p.string()), nullptr));
+    fs::remove(p);
+}
+
+TEST(AssetsMalformed, GltfMissingExternalBufferReturnsNull) {
+    const auto p = write_tmp_text("ignis_bad_missing_bin.gltf", gltf_external_buffer("missing.bin"));
+    AssetManager am; // EditorFilesystem: external URIs allowed, file absent
+    EXPECT_EQ(am.load_model(p.string()), nullptr);
+    fs::remove(p);
+}
+
+TEST(AssetsMalformed, ExternalBufferWorksInEditorMode) {
+    // Control: editor mode (trusted process) still loads external .bin buffers
+    // resolved relative to the .gltf file.
+    const auto bin = write_tmp_bytes("ignis_ext.bin", std::vector<u8>(42, 0));
+    const auto p = write_tmp_text("ignis_ext.gltf", gltf_external_buffer("ignis_ext.bin"));
+    AssetManager am; // EditorFilesystem (default)
+    auto model = am.load_model(p.string());
+    ASSERT_NE(model, nullptr);
+    ASSERT_EQ(model->mesh->primitives.size(), 1u);
+    EXPECT_EQ(model->mesh->primitives[0].positions.size(), 3u);
+    fs::remove(p);
+    fs::remove(bin);
+}
+
+TEST(AssetsMalformed, PackageOnlyRejectsExternalBufferTraversal) {
+    // The pak boundary must be real: a .gltf inside the pak whose buffer URI
+    // escapes the package ("../...") must not be opened on the host FS in
+    // PackageOnly (cgltf's own FILE* loading would follow the traversal).
+    const auto bin = write_tmp_bytes("ignis_pak_evil.bin", std::vector<u8>(42, 0));
+    const auto gltf = gltf_external_buffer("../ignis_pak_evil.bin"); // exists next to CWD on host
+    const auto pak_path = fs::temp_directory_path() / "ignis_evil.ignispak";
+    PakWriter w;
+    ASSERT_TRUE(w.add_file("assets/m.gltf", std::vector<u8>(gltf.begin(), gltf.end())).ok());
+    ASSERT_TRUE(w.write(pak_path.string()).ok());
+    PakReader reader;
+    ASSERT_TRUE(reader.open(pak_path.string()).ok());
+    AssetManager am;
+    am.set_pak(&reader);
+    am.set_access_mode(AssetAccessMode::PackageOnly);
+    EXPECT_EQ(am.load_model("assets/m.gltf"), nullptr);
+    fs::remove(pak_path);
+    fs::remove(bin);
+}
+
+TEST(AssetsMalformed, PackageOnlyLoadsDataUriModelFromPak) {
+    // Control: the same loader path works when the buffer is embedded.
+    const auto gltf = make_gltf_triangle();
+    const auto pak_path = fs::temp_directory_path() / "ignis_good.ignispak";
+    PakWriter w;
+    ASSERT_TRUE(w.add_file("assets/m.gltf", std::vector<u8>(gltf.begin(), gltf.end())).ok());
+    ASSERT_TRUE(w.write(pak_path.string()).ok());
+    PakReader reader;
+    ASSERT_TRUE(reader.open(pak_path.string()).ok());
+    AssetManager am;
+    am.set_pak(&reader);
+    am.set_access_mode(AssetAccessMode::PackageOnly);
+    auto model = am.load_model("assets/m.gltf");
+    ASSERT_NE(model, nullptr);
+    ASSERT_EQ(model->mesh->primitives.size(), 1u);
+    EXPECT_EQ(model->mesh->primitives[0].positions.size(), 3u);
+    fs::remove(pak_path);
+}
+
+TEST(AssetsMalformed, CorruptTexturesReturnNull) {
+    std::vector<u8> garbage(512, 0xAB);
+    const auto p1 = write_tmp_bytes("ignis_garbage.png", garbage);
+    const auto p2 = write_tmp_bytes("ignis_empty.png", {});
+    const auto p3 = write_tmp_bytes("ignis_trunc.png", {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A});
+    AssetManager am;
+    EXPECT_EQ(am.load_texture(p1.string()), nullptr);
+    EXPECT_EQ(am.load_texture(p2.string()), nullptr);
+    EXPECT_EQ(am.load_texture(p3.string()), nullptr);
+    EXPECT_EQ(am.cache_size(), 0u);
+    fs::remove(p1);
+    fs::remove(p2);
+    fs::remove(p3);
+}

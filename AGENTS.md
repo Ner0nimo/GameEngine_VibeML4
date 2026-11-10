@@ -32,6 +32,31 @@ cmake --preset release && cmake --build --preset release
 - Warnings are errors (`-Werror`) on all Ignis targets. Third-party headers
   are SYSTEM includes; never add warnings to third-party targets.
 
+## CI & security gates (all must be green before a PR merges)
+
+- `CI` (`.github/workflows/ci.yml`): headless build + `ctest` + runtime/export
+  smoke tests + a `-Werror` syntax check of the graphics-only TUs, and a full
+  graphics build + `ctest` (lavapipe software Vulkan).
+- `Security CI` (`.github/workflows/security.yml`): ASan+UBSan test run
+  (`headless-asan` preset); libFuzzer smoke over every untrusted-input parser
+  (`fuzz_pak`, `fuzz_scene`, `fuzz_json`, `fuzz_gltf`, `fuzz_texture`,
+  `fuzz_audio`, `fuzz_commands` — corpus in `tests/fuzz/corpus/<name>/`);
+  clang-tidy security checks; gitleaks secret scan over full history;
+  actionlint workflow lint; a FetchContent pin audit (every `GIT_TAG` must be a
+  40-hex commit SHA over `https://`); and an audit that every workflow
+  `uses:` is pinned to a full commit SHA.
+- `CodeQL` (`.github/workflows/codeql.yml`): cpp `security-and-quality` on PRs
+  and weekly; SARIF lands in the Security tab.
+
+Rules for PRs from agents:
+
+- Add unit tests for any new parser/untrusted-input path, and a fuzz target in
+  `tests/fuzz/` for any new file format.
+- Never add a GitHub Action or a dependency without a pinned commit SHA; never
+  commit secrets. Dependabot bumps the pinned action SHAs weekly.
+- `.github/CODEOWNERS` requires owner review for workflow and dependency
+  changes.
+
 ## Architecture
 
 ```

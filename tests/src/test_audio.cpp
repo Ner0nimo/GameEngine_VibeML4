@@ -297,3 +297,65 @@ TEST(Audio, AudioSourceViaAgentCommand) {
     }
     EXPECT_TRUE(found);
 }
+
+namespace {
+
+// 42-byte FLAC whose STREAMINFO claims 2^36 total samples: a decode-length
+// allocation bomb if the claimed length is trusted.
+std::vector<u8> make_flac_bomb() {
+    std::vector<u8> f = {'f', 'L', 'a', 'C', 0x80, 0x00, 0x00, 0x22};
+    f.insert(f.end(), {0x10, 0x00, 0x10, 0x00, 0, 0, 0, 0, 0, 0}); // block/frame sizes
+    const unsigned long long v =
+        (44100ull << 44) | (0ull << 41) | (15ull << 36) | ((1ull << 36) - 1);
+    for (int i = 7; i >= 0; --i) f.push_back(static_cast<u8>((v >> (8 * i)) & 0xFF));
+    f.insert(f.end(), 16, 0); // md5
+    return f;
+}
+
+} // namespace
+
+TEST(AudioDecodeSecurity, GarbageMemoryFails) {
+    std::vector<u8> garbage(512);
+    for (size_t i = 0; i < garbage.size(); ++i) garbage[i] = static_cast<u8>(i * 37 + 11);
+    DecodedAudio out;
+    EXPECT_FALSE(decode_audio_memory(garbage.data(), garbage.size(), out));
+}
+
+TEST(AudioDecodeSecurity, EmptyMemoryFails) {
+    const u8 dummy = 0;
+    DecodedAudio out;
+    EXPECT_FALSE(decode_audio_memory(&dummy, 0, out));
+}
+
+TEST(AudioDecodeSecurity, TruncatedWavDecodesConsistently) {
+    auto wav = make_wav();
+    wav.resize(60); // header claims 800 samples, only ~16 payload bytes exist
+    DecodedAudio out;
+    const bool ok = decode_audio_memory(wav.data(), wav.size(), out);
+    if (ok) {
+        EXPECT_GT(out.frames, 0u);
+        EXPECT_LE(out.frames, 800u);
+        EXPECT_EQ(out.samples.size(), static_cast<size_t>(out.frames) * out.channels);
+    }
+}
+
+TEST(AudioDecodeSecurity, FlacHugeClaimedLengthRejected) {
+    const auto bomb = make_flac_bomb();
+    DecodedAudio out;
+    EXPECT_FALSE(decode_audio_memory(bomb.data(), bomb.size(), out));
+}
+
+TEST(AudioDecodeSecurity, PlayMemoryGarbageFailsCleanly) {
+    AudioEngine engine;
+    ASSERT_TRUE(engine.init(true).ok());
+    const std::vector<u8> garbage(256, 0xCD);
+    auto r = engine.play_memory(garbage.data(), garbage.size());
+    EXPECT_FALSE(r.ok());
+    EXPECT_FALSE(r.error().empty());
+    EXPECT_EQ(engine.active_sound_count(), 0u);
+    // Engine still usable afterwards.
+    const auto wav = make_wav();
+    auto ok = engine.play_memory(wav.data(), wav.size());
+    ASSERT_TRUE(ok.ok()) << ok.error();
+    engine.shutdown();
+}

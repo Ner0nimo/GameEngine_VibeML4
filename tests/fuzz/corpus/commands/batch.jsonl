@@ -1,0 +1,5 @@
+{"cmd": "create_entity", "name": "a"}
+{"cmd": "add_component", "entity": 1, "component": "Transform", "props": {"position": [1,2,3]}}
+not json
+{"cmd": "unknown_cmd"}
+{"cmd": "set_parent", "entity": 1, "parent": 1}
