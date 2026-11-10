@@ -389,6 +389,22 @@ ImVec4 log_color(LogLevel l) {
     }
 }
 
+void item_tooltip(const char* text) {
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", text);
+}
+
+const char* const kGameobjectKinds[] = {"Empty", "Cube", "Camera", "Directional Light",
+                                        "Point Light", "Audio Source"};
+const char* const kGameobjectTips[] = {
+    "create an entity with only a Transform component",
+    "create an entity with Transform + MeshRenderer (assets/cube.gltf)",
+    "create an entity with Transform + Camera",
+    "create an entity with Transform + DirectionalLight",
+    "create an entity with Transform + PointLight",
+    "create an entity with Transform + AudioSource",
+};
+constexpr u32 kGameobjectKindCount = static_cast<u32>(sizeof(kGameobjectKinds) / sizeof(kGameobjectKinds[0]));
+
 } // namespace
 
 // --- main loop: one frame = input, simulate, UI panels, render ----------------
@@ -703,16 +719,21 @@ void EditorApp::draw_menu_bar() {
     if (!ImGui::BeginMainMenuBar()) return;
     if (ImGui::BeginMenu("File")) {
         if (ImGui::MenuItem("New scene", "Ctrl+N")) new_scene();
+        item_tooltip("discard the current scene and start an empty one");
         draw_open_scene_menu();
         ImGui::Separator();
         if (ImGui::MenuItem("Save", "Ctrl+S")) save_scene();
+        item_tooltip("write the scene to the current file");
         if (ImGui::MenuItem("Save as...")) {
             save_as_open_ = true;
             std::snprintf(save_as_buf_, sizeof(save_as_buf_), "%s", scene_path_.c_str());
         }
+        item_tooltip("write the scene to a different file and make it the current one");
         if (ImGui::MenuItem("Reload from file")) reload_scene();
+        item_tooltip("reload the scene from disk, discarding unsaved changes");
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Esc")) window_->request_close();
+        item_tooltip("close the editor");
         ImGui::EndMenu();
     }
     draw_gameobject_menu();
@@ -728,16 +749,24 @@ void EditorApp::draw_menu_bar() {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("redo the last undone change");
         ImGui::Separator();
         if (ImGui::MenuItem("Delete selected", "Del", false, has_sel)) delete_entity(selected_);
+        item_tooltip("delete the selected entity and its children");
         if (ImGui::MenuItem("Duplicate selected", "Ctrl+D", false, has_sel)) duplicate_entity(selected_);
+        item_tooltip("create a copy of the selected entity (offset by +1 on X)");
         if (ImGui::MenuItem("Frame selected", "F", false, has_sel)) frame_selected();
+        item_tooltip("move the camera to look at the selected entity");
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Hierarchy", nullptr, &show_hierarchy_);
+        item_tooltip("show/hide the entity hierarchy panel");
         ImGui::MenuItem("Inspector", nullptr, &show_inspector_);
+        item_tooltip("show/hide the selected entity's component inspector");
         ImGui::MenuItem("Bottom panel", nullptr, &show_bottom_);
+        item_tooltip("show/hide the bottom panel (console / assets / stats)");
         ImGui::MenuItem("Status bar", nullptr, &show_statusbar_);
+        item_tooltip("show/hide the status bar at the bottom");
         ImGui::MenuItem("Viewport overlay", nullptr, &show_overlay_);
+        item_tooltip("show/hide the scene/camera/selection overlay drawn on the viewport");
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Run")) {
@@ -745,7 +774,10 @@ void EditorApp::draw_menu_bar() {
             if (playing_) stop_play();
             else start_play();
         }
+        item_tooltip(playing_ ? "pause simulation and restore the pre-play scene state"
+                              : "snapshot the scene, then simulate (scripts, physics, audio)");
         if (ImGui::MenuItem("Stop (restore pre-play state)", nullptr, false, playing_)) stop_play();
+        item_tooltip("stop simulating and restore the scene as it was before Play");
         ImGui::EndMenu();
     }
     draw_help_menu();
@@ -765,18 +797,21 @@ void EditorApp::draw_open_scene_menu() {
     if (files.empty()) {
         ImGui::MenuItem("(no scenes in scenes/)", nullptr, false, false);
     } else {
-        for (const auto& f : files)
+        for (const auto& f : files) {
             if (ImGui::MenuItem(f.filename().string().c_str())) open_scene(f.generic_string());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("open %s", f.generic_string().c_str());
+        }
     }
     ImGui::EndMenu();
 }
 
 void EditorApp::draw_gameobject_menu() {
     if (!ImGui::BeginMenu("GameObject")) return;
-    static const char* kinds[] = {"Empty", "Cube", "Camera", "Directional Light", "Point Light",
-                                  "Audio Source"};
-    for (const char* k : kinds)
-        if (ImGui::MenuItem(k)) create_gameobject(k);
+    for (u32 i = 0; i < kGameobjectKindCount; ++i) {
+        if (ImGui::MenuItem(kGameobjectKinds[i])) create_gameobject(kGameobjectKinds[i]);
+        item_tooltip(kGameobjectTips[i]);
+    }
     const std::vector<std::string> prefabs = scene_->prefab_names();
     if (!prefabs.empty()) {
         ImGui::Separator();
@@ -788,6 +823,7 @@ void EditorApp::draw_gameobject_menu() {
                     IGNIS_INFO("spawned prefab '{}' (#%llu)", p, static_cast<unsigned long long>(e));
                 }
             }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("spawn prefab '%s' into the scene", p.c_str());
         }
     }
     ImGui::EndMenu();
@@ -796,6 +832,7 @@ void EditorApp::draw_gameobject_menu() {
 void EditorApp::draw_help_menu() {
     if (!ImGui::BeginMenu("Help")) return;
     if (ImGui::MenuItem("Shortcuts & about")) show_help_ = true;
+    item_tooltip("show all keyboard shortcuts and scene info");
     ImGui::EndMenu();
 }
 
@@ -826,6 +863,7 @@ void EditorApp::draw_save_as_modal() {
     ImGui::OpenPopup("Save scene as");
     if (ImGui::BeginPopupModal("Save scene as", &save_as_open_, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::InputText("path", save_as_buf_, sizeof(save_as_buf_));
+        item_tooltip("scene file path, e.g. scenes/my_scene.scene.json");
         if (ImGui::Button("Save")) {
             if (auto r = scene_->save_to_file(save_as_buf_); r.ok()) {
                 scene_path_ = save_as_buf_;
@@ -837,11 +875,13 @@ void EditorApp::draw_save_as_modal() {
                 IGNIS_ERROR("{}", r.error());
             }
         }
+        item_tooltip("write the scene to the path above and make it the current file");
         ImGui::SameLine();
         if (ImGui::Button("Cancel")) {
             save_as_open_ = false;
             ImGui::CloseCurrentPopup();
         }
+        item_tooltip("close without saving");
         ImGui::EndPopup();
     }
 }
@@ -931,6 +971,18 @@ void EditorApp::draw_hierarchy_node(EntityId e) {
     if (selected_ == e) flags |= ImGuiTreeNodeFlags_Selected;
     const bool open = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<intptr_t>(e)), flags,
                                         "%s", w.name_of(e).c_str());
+    if (ImGui::IsItemHovered()) {
+        std::string comps;
+        for (const auto& [type, storage] : w.storages()) {
+            if (!storage->has(e)) continue;
+            if (const ComponentTypeInfo* info = w.registry().find_by_type(type)) {
+                if (!comps.empty()) comps += ", ";
+                comps += info->name;
+            }
+        }
+        ImGui::SetTooltip("#%llu %s\ncomponents: %s  |  click = select, drag onto another node = reparent",
+                          static_cast<unsigned long long>(e), w.name_of(e).c_str(), comps.c_str());
+    }
     // Drag & drop reparenting: World::set_parent rejects cycles, so a drop on
     // a descendant is a no-op rather than corruption.
     if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
@@ -957,12 +1009,16 @@ void EditorApp::draw_hierarchy_node(EntityId e) {
             w.set_parent(c, e);
             selected_ = c;
         }
+        item_tooltip("create an empty entity as a child of this one");
         if (ImGui::MenuItem("Rename")) {
             rename_target_ = e;
             std::snprintf(rename_buf_, sizeof(rename_buf_), "%s", w.name_of(e).c_str());
         }
+        item_tooltip("rename this entity");
         if (ImGui::MenuItem("Duplicate")) duplicate_entity(e);
+        item_tooltip("create a copy of this entity (offset by +1 on X)");
         if (ImGui::MenuItem("Delete")) delete_entity(e);
+        item_tooltip("delete this entity and its children");
         ImGui::EndPopup();
     }
     if (open) {
@@ -982,17 +1038,19 @@ void EditorApp::draw_hierarchy() {
     World& w = scene_->world();
     if (ImGui::BeginPopupContextWindow("hierarchy_bg")) {
         if (ImGui::BeginMenu("Create")) {
-            static const char* kinds[] = {"Empty", "Cube", "Camera", "Directional Light",
-                                          "Point Light", "Audio Source"};
-            for (const char* k : kinds)
-                if (ImGui::MenuItem(k)) create_gameobject(k);
+            for (u32 i = 0; i < kGameobjectKindCount; ++i) {
+                if (ImGui::MenuItem(kGameobjectKinds[i])) create_gameobject(kGameobjectKinds[i]);
+                item_tooltip(kGameobjectTips[i]);
+            }
             ImGui::EndMenu();
         }
         ImGui::EndPopup();
     }
     ImGui::InputTextWithHint("##hier_filter", "filter...", hierarchy_filter_, sizeof(hierarchy_filter_));
+    item_tooltip("filter entities by name (case-insensitive); matching entities are listed flat");
     ImGui::SameLine();
     if (ImGui::SmallButton("Clear")) hierarchy_filter_[0] = '\0';
+    item_tooltip("clear the filter and show the tree again");
     const std::string filter = hierarchy_filter_;
     if (!filter.empty()) {
         // Flat list of case-insensitive name matches.
@@ -1005,6 +1063,8 @@ void EditorApp::draw_hierarchy() {
             const std::string name = w.name_of(e);
             if (lower(name).find(f) == std::string::npos) continue;
             if (ImGui::Selectable(name.c_str(), selected_ == e)) selected_ = e;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("#%llu - click to select", static_cast<unsigned long long>(e));
         }
     } else {
         std::vector<EntityId> roots;
@@ -1019,6 +1079,7 @@ void EditorApp::draw_hierarchy() {
         ImGui::OpenPopup("Rename entity");
         if (ImGui::BeginPopupModal("Rename entity", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::InputText("name", rename_buf_, sizeof(rename_buf_));
+            item_tooltip("new name for the entity");
             if (ImGui::Button("OK")) {
                 history_->begin("rename entity");
                 w.set_name(rename_target_, rename_buf_);
@@ -1026,11 +1087,13 @@ void EditorApp::draw_hierarchy() {
                 rename_target_ = NULL_ENTITY;
                 ImGui::CloseCurrentPopup();
             }
+            item_tooltip("apply the new name");
             ImGui::SameLine();
             if (ImGui::Button("Cancel")) {
                 rename_target_ = NULL_ENTITY;
                 ImGui::CloseCurrentPopup();
             }
+            item_tooltip("keep the old name");
             ImGui::EndPopup();
         }
     }
@@ -1057,6 +1120,7 @@ void EditorApp::draw_inspector() {
         std::snprintf(name_buf, sizeof(name_buf), "%s", w.name_of(selected_).c_str());
         history_->begin("edit name"); // coalesced per drag/typing session by SceneHistory
         if (ImGui::InputText("name", name_buf, sizeof(name_buf))) w.set_name(selected_, name_buf);
+        item_tooltip("entity name (used by scripts, hierarchy and serialization)");
     }
     const EntityId parent = w.parent_of(selected_);
     ImGui::TextDisabled("parent: %s", parent == NULL_ENTITY ? "(root)" : w.name_of(parent).c_str());
@@ -1076,6 +1140,8 @@ void EditorApp::draw_inspector() {
             ImGui::PopID();
             continue;
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("remove the %s component from this entity", info->name.c_str());
         if (open) {
             history_->begin("edit " + info->name); // one undo entry per drag, not per frame
             if (info->name == "Transform") edit_transform(*w.get<TransformComponent>(selected_));
@@ -1102,8 +1168,10 @@ void EditorApp::draw_inspector() {
                     ImGui::DragFloat("max_distance", &a.max_distance, 0.5f, 0.1f, 10000.f);
                 }
                 if (ImGui::Button("Play")) audio_sys_->play_source(selected_, w);
+                item_tooltip("start playing this audio source now");
                 ImGui::SameLine();
                 if (ImGui::Button("Stop")) audio_sys_->stop_source(selected_, w);
+                item_tooltip("stop playing this audio source");
                 ImGui::SameLine();
                 ImGui::TextDisabled(audio_sys_->source_playing(selected_) ? "playing" : "stopped");
             }
@@ -1113,6 +1181,7 @@ void EditorApp::draw_inspector() {
 
     // Add Component combo: every registered type the entity doesn't have yet.
     if (ImGui::BeginCombo("Add Component", "+ add...")) {
+        item_tooltip("add a component to the selected entity");
         for (const std::string& name : w.registry().names()) {
             const ComponentTypeInfo* info = w.registry().find_by_name(name);
             if (!info) continue;
@@ -1125,6 +1194,8 @@ void EditorApp::draw_inspector() {
                 info->add_default(w, selected_);
                 history_->commit();
             }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("add %s with default values", name.c_str());
         }
         ImGui::EndCombo();
     }
@@ -1151,13 +1222,16 @@ void EditorApp::draw_console() {
     }
     ImGui::SameLine();
     ImGui::InputText("filter", console_filter_, sizeof(console_filter_));
+    item_tooltip("only show messages containing this text");
     ImGui::SameLine();
     if (ImGui::SmallButton("Clear")) {
         std::lock_guard lock(console_mutex_);
         console_.clear();
     }
+    item_tooltip("clear all console messages");
     ImGui::SameLine();
     ImGui::Checkbox("auto-scroll", &console_autoscroll_);
+    item_tooltip("scroll to the newest message automatically");
     const std::string filter = console_filter_;
     ImGui::BeginChild("##console_scroll", ImVec2(0.f, -30.f), ImGuiChildFlags_Borders);
     std::lock_guard lock(console_mutex_);
@@ -1177,6 +1251,8 @@ void EditorApp::draw_console_input() {
     const bool run = ImGui::InputTextWithHint("##cmd", "{\"cmd\": \"create_entity\", \"name\": \"Bot\"}  (Enter = run agent command)",
                                               console_input_, sizeof(console_input_),
                                               ImGuiInputTextFlags_EnterReturnsTrue);
+    item_tooltip("run a JSON agent command on Enter, e.g. {\"cmd\": \"list_entities\"}; "
+                 "the result is logged below");
     ImGui::PopItemWidth();
     if (run) {
         run_console_command(console_input_);
@@ -1195,6 +1271,7 @@ void EditorApp::draw_asset_browser() {
             IGNIS_INFO("copied path '{}'", selected_asset_);
         }
     }
+    item_tooltip("copy the selected file's relative path to the clipboard");
     ImGui::SameLine();
     if (ImGui::SmallButton("Use on selected")) assign_selected_asset();
     if (ImGui::IsItemHovered())
@@ -1213,9 +1290,14 @@ void EditorApp::draw_asset_browser() {
                     draw_dir(entry.path(), root);
                     ImGui::TreePop();
                 }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s - click to expand/collapse", entry.path().generic_string().c_str());
             } else {
-                const bool sel = selected_asset_ == fs::relative(entry.path(), root).generic_string();
-                if (ImGui::Selectable(name.c_str(), sel)) selected_asset_ = fs::relative(entry.path(), root).generic_string();
+                const std::string rel = fs::relative(entry.path(), root).generic_string();
+                const bool sel = selected_asset_ == rel;
+                if (ImGui::Selectable(name.c_str(), sel)) selected_asset_ = rel;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s - click to select", rel.c_str());
                 ImGui::SameLine();
                 ImGui::TextDisabled("%llu B", static_cast<unsigned long long>(entry.file_size()));
             }
@@ -1226,6 +1308,8 @@ void EditorApp::draw_asset_browser() {
             draw_dir(root, root);
             ImGui::TreePop();
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s/ - click to expand/collapse", root.generic_string().c_str());
     }
     ImGui::EndChild();
     if (!selected_asset_.empty()) ImGui::Text("selected: %s", selected_asset_.c_str());
@@ -1323,9 +1407,24 @@ void EditorApp::draw_bottom_panel(f32 dt) {
         return;
     }
     if (ImGui::BeginTabBar("##bottom_tabs")) {
-        if (ImGui::BeginTabItem("Console")) { bottom_tab_ = 0; draw_console(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Assets")) { bottom_tab_ = 1; draw_asset_browser(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Stats")) { bottom_tab_ = 2; draw_stats(dt); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Console")) {
+            item_tooltip("engine log with level/text filters + JSON agent command input");
+            bottom_tab_ = 0;
+            draw_console();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Assets")) {
+            item_tooltip("browse assets/, scripts/, scenes/; assign files to the selected entity");
+            bottom_tab_ = 1;
+            draw_asset_browser();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Stats")) {
+            item_tooltip("frame time, fps graph, draw calls, entities");
+            bottom_tab_ = 2;
+            draw_stats(dt);
+            ImGui::EndTabItem();
+        }
         ImGui::EndTabBar();
     }
     ImGui::End();
