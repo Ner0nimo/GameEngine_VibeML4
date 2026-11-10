@@ -30,9 +30,12 @@ namespace ignis {
 enum class GizmoOp : u8 { Translate = 0, Rotate, Scale };
 
 // The editor application: window + Vulkan renderer + ImGui editor UI
-// (menu/toolbar, hierarchy, inspector, console, asset browser, status bar,
-// viewport transform gizmo) + an AI-agent command interface (--commands).
-// Only built with IGNIS_WITH_GRAPHICS=ON.
+// (menu bar with file/gameobject/help, toolbar with gizmo mode/space/snap,
+// hierarchy with filter + drag&drop reparenting, inspector, console with
+// level filters + JSON command input, asset browser, stats graph, status bar,
+// viewport overlay + transform gizmo, play-mode snapshot/restore) + an
+// AI-agent command interface (--commands). Only built with
+// IGNIS_WITH_GRAPHICS=ON.
 class EditorApp {
 public:
     EditorApp();
@@ -71,19 +74,35 @@ private:
     UiHandles ui_;
 
     // --- editor UI state ------------------------------------------------------
+    std::string scene_path_; // file the current scene is loaded from / saves to
     GizmoOp gizmo_op_ = GizmoOp::Translate;
+    bool gizmo_world_space_ = false; // gizmo mode: LOCAL (object) vs WORLD
+    bool gizmo_snap_ = false;
+    f32 snap_translate_ = 0.5f;
+    f32 snap_rotate_deg_ = 15.f;
+    f32 snap_scale_ = 0.1f;
     bool show_hierarchy_ = true;
     bool show_inspector_ = true;
     bool show_bottom_ = true;
     bool show_statusbar_ = true;
+    bool show_overlay_ = true;  // viewport text overlay
+    bool show_help_ = false;
     int bottom_tab_ = 0; // 0 = console, 1 = assets, 2 = stats
     std::vector<std::pair<LogLevel, std::string>> console_;
     std::mutex console_mutex_;
     char console_filter_[128] = "";
     bool console_autoscroll_ = true;
+    bool log_show_[6] = {true, true, true, true, true, true}; // by LogLevel index
+    char console_input_[512] = ""; // JSON agent command line
     std::string selected_asset_;
     EntityId rename_target_ = NULL_ENTITY;
     char rename_buf_[128] = "";
+    char hierarchy_filter_[128] = "";
+    bool save_as_open_ = false;
+    char save_as_buf_[256] = "";
+    std::vector<f32> fps_history_; // ring buffer (capped) for the stats graph
+    nlohmann::json play_snapshot_;  // scene state captured when play starts
+    bool has_snapshot_ = false;
     // fly-camera input state
     f32 cam_yaw_ = 0.f, cam_pitch_ = 0.f;
     bool rmb_down_ = false;
@@ -94,28 +113,46 @@ private:
     Result<void> init_window_and_renderer();
     Result<void> init_scene_and_systems(const std::string& scene_path, const std::string& commands_path);
     Result<void> init_imgui_ui();
-    void main_loop(const std::string& scene_path); // one frame = input, simulate, UI, render
+    void main_loop(); // one frame = input, simulate, UI, render
     void shutdown_ui();
 
     // One frame of UI, one function per panel (one level of abstraction).
     EntityId find_active_camera() const;
     void update_camera(Camera& camera, EntityId cam_entity) const;
     void handle_viewport_input(Camera& camera, EntityId cam_entity, f32 dt);
-    void handle_shortcuts(const std::string& scene_path);
-    void draw_menu_bar(const std::string& scene_path);
-    void draw_toolbar(const std::string& scene_path);
+    void handle_shortcuts();
+    void draw_menu_bar();
+    void draw_open_scene_menu();
+    void draw_gameobject_menu();
+    void draw_help_menu();
+    void draw_help_window();
+    void draw_save_as_modal();
+    void draw_toolbar();
     void draw_hierarchy();
     void draw_hierarchy_node(EntityId e);
     void draw_inspector();
-    void draw_bottom_panel();
+    void draw_bottom_panel(f32 dt);
     void draw_console();
+    void draw_console_input();
     void draw_asset_browser();
     void draw_stats(f32 dt);
     void draw_status_bar(f32 dt);
     void draw_viewport_gizmo(const Camera& camera, f32 aspect);
+    void draw_viewport_overlay(const Camera& camera, EntityId cam_entity);
+    // scene actions (shared by menus, toolbar and shortcuts)
+    void update_window_title();
+    void save_scene();
+    void new_scene();
+    void open_scene(const std::string& path);
+    void reload_scene();
+    void start_play(); // snapshot scene, then simulate
+    void stop_play();  // restore the snapshot taken by start_play
+    EntityId create_gameobject(const std::string& kind);
+    void frame_selected();
+    void run_console_command(const std::string& line);
+    void assign_selected_asset();
     void delete_entity(EntityId e);
     void duplicate_entity(EntityId e);
-    void reload_scene(const std::string& scene_path);
 #endif
 };
 

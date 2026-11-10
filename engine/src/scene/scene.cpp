@@ -138,16 +138,30 @@ Result<Scene> Scene::load_from_file(const std::string& path) {
     }
 }
 
+Result<void> Scene::load_json(const nlohmann::json& j) {
+    try {
+        // Load INTO this scene: swap in the parsed world/prefabs/name, keep
+        // the system pipeline (and anything else registered on this object).
+        Scene tmp = deserialize(j);
+        world_ = std::move(tmp.world_);
+        prefabs_ = std::move(tmp.prefabs_);
+        name_ = std::move(tmp.name_);
+        return Result<void>::success();
+    } catch (const std::exception& e) {
+        return Result<void>::failure(std::string("malformed scene JSON: ") + e.what());
+    }
+}
+
 Result<void> Scene::load_file(const std::string& path) {
-    auto loaded = load_from_file(path);
-    if (!loaded.ok()) return Result<void>::failure(loaded.error());
-    // Load INTO this scene: swap in the parsed world/prefabs/name, keep the
-    // system pipeline (and anything else registered on this object).
-    Scene& tmp = loaded.value();
-    world_ = std::move(tmp.world_);
-    prefabs_ = std::move(tmp.prefabs_);
-    name_ = std::move(tmp.name_);
-    return Result<void>::success();
+    std::ifstream f(path);
+    if (!f) return Result<void>::failure("cannot open scene '" + path + "'");
+    std::stringstream ss;
+    ss << f.rdbuf();
+    try {
+        return load_json(nlohmann::json::parse(ss.str()));
+    } catch (const std::exception& e) {
+        return Result<void>::failure("cannot parse scene '" + path + "': " + e.what());
+    }
 }
 
 } // namespace ignis
