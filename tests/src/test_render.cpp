@@ -264,9 +264,10 @@ TEST(Render, PointLightLightsCube) {
     };
     const u64 lit = total(withLight);
     const u64 dark = total(without);
-    std::fprintf(stderr, "point light: total with=%llu without=%llu center with=%u without=%u\n",
+    const size_t ci = (32u * 64u + 32u) * 4u; // center: debug-encoded (worldPos.z+3, N.z+1, dist/2)
+    std::fprintf(stderr, "point light: total with=%llu without=%llu center RGB=(%u,%u,%u)\n",
                  static_cast<unsigned long long>(lit), static_cast<unsigned long long>(dark),
-                 center(withLight), center(without));
+                 withLight[ci], withLight[ci + 1], withLight[ci + 2]);
     // Whole-frame sum is robust to per-pixel jitter on software rasterizers.
     EXPECT_GT(lit, dark + 2000u) << "point light must brighten the frame";
 }
