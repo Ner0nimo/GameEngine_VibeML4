@@ -1531,8 +1531,8 @@ void EditorApp::main_loop() {
 
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
-        ImGuizmo::BeginFrame();
         ImGui::NewFrame();
+        ImGuizmo::BeginFrame(); // must come after ImGui::NewFrame: it calls ImGui::Begin internally
 
         draw_menu_bar();
         draw_toolbar();
