@@ -47,8 +47,11 @@ We're building a production-grade, simple and straight-forward 3D Game Engine fo
 - Import gltf meshes with materials and textures
 - Editor has gizmo to position them in the world
 - PBR material workflow
-- IBL with HDRIs from https://polyhaven.com/hdris
-- Soft shadow maps
+- IBL with HDRIs from https://polyhaven.com/hdris (diffuse irradiance +
+  mipmapped prefiltered radiance cubemap + BRDF LUT for roughness-correct
+  specular reflections, built on CPU at load time)
+- Soft shadow maps (PCSS: blocker search + penumbra-scaled PCF, frustum
+  follows the camera)
 - Good SSAO
 - HDR pipeline with tonemapping
 

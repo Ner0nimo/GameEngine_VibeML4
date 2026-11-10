@@ -84,6 +84,11 @@ struct LinePush {
     alignas(16) math::Mat4 viewProj;
 };
 
+// IBL environment constants shared with the lighting shader (envMipLevels).
+constexpr u32 kEnvMipLevels = 5;
+constexpr u32 kPrefilterFaceSize = 64; // base face size of the specular prefilter cubemap
+constexpr u32 kBrdfLutSize = 128;
+
 struct LightUBO {
     alignas(16) math::Vec3 camPos;
     f32 _pad0;
@@ -93,8 +98,15 @@ struct LightUBO {
     f32 _pad1;
     alignas(16) math::Mat4 lightViewProj;
     alignas(8) math::Vec2 shadowMapInvSize;
+    alignas(8) math::Vec2 shadowDepthRange; // x = znear, y = zfar - znear of the light ortho
     f32 shadowBias;
     f32 ambientStrength;
+    f32 envMipLevels;
+    f32 shadowSearchTexels;
+    f32 shadowMaxPenumbra;
+    f32 shadowLightSize;
+    f32 shadowBoxWidth;
+    f32 _pad2;
     alignas(16) math::Vec4 clearColor;
 };
 
@@ -316,7 +328,7 @@ struct VulkanRenderer::Impl {
         shSSAOFrag, shBlurFrag, shLightingFrag, shTonemapFrag, shLineVert, shLineFrag;
     InputLayoutHandle meshInputLayout, lineInputLayout;
 
-    SamplerHandle sampLinear, sampNearest, sampShadow;
+    SamplerHandle sampLinear, sampNearest, sampShadow, sampPrefilter;
 
     GraphicsPipelineHandle psoGbuffer, psoShadow, psoSSAO, psoBlur, psoLighting, psoTonemap, psoLine;
 
@@ -338,6 +350,7 @@ struct VulkanRenderer::Impl {
     std::vector<FramebufferHandle> fbSwap;
 
     TextureHandle texWhite, texBlack, texNormalDefault, texIrradianceCube;
+    TextureHandle texPrefilterCube, texBrdfLUT;
 
     BufferHandle cbLight, cbSSAO, cbBlur, cbTonemap, cbDummy;
     BindingSetHandle setSSAO, setBlur, setLightingTex, setLightingUBO, setTonemap;
@@ -570,6 +583,11 @@ struct VulkanRenderer::Impl {
         SamplerDesc sdShadow = sdClamp;
         sdShadow.reductionType = SamplerReductionType::Comparison;
         sampShadow = dev->createSampler(sdShadow);
+        // Prefiltered radiance cubemap: linear within a mip, explicit textureLod
+        // picks the roughness mip in the shader.
+        SamplerDesc sdPrefilter = sdClamp;
+        sdPrefilter.mipFilter = true;
+        sampPrefilter = dev->createSampler(sdPrefilter);
 
         // Binding layouts. GBuffer: set 0 = push constants + a dummy CB (NVRHI
         // requires at least one non-push item per layout), set 1 = material
@@ -591,7 +609,7 @@ struct VulkanRenderer::Impl {
         layoutBlur = makeLayout({BindingLayoutItem::Texture_SRV(0), BindingLayoutItem::Sampler(0),
                                  BindingLayoutItem::ConstantBuffer(1)},
                                 ShaderType::Pixel);
-        layoutLightingTex = makeLayout(texSlots(8, 0), ShaderType::Pixel);
+        layoutLightingTex = makeLayout(texSlots(10, 0), ShaderType::Pixel); // 0-6 gbuffer/shadow, 7 irradiance, 8 prefilter, 9 brdf LUT
         layoutLightingUBO = makeLayout({BindingLayoutItem::ConstantBuffer(0)}, ShaderType::Pixel);
         layoutTonemap = makeLayout({BindingLayoutItem::Texture_SRV(0), BindingLayoutItem::Sampler(0),
                                     BindingLayoutItem::ConstantBuffer(1)},
@@ -656,6 +674,54 @@ struct VulkanRenderer::Impl {
             });
         }
 
+        // Default prefiltered specular cubemap: uniform gray, all mips (until an
+        // HDR environment is loaded via set_environment_hdr). Face size 16 so
+        // all kEnvMipLevels mips are >= 1 texel.
+        {
+            TextureDesc d;
+            d.width = 16;
+            d.height = 16;
+            d.arraySize = 6;
+            d.mipLevels = kEnvMipLevels;
+            d.format = Format::RGBA32_FLOAT;
+            d.dimension = TextureDimension::TextureCube;
+            d.isShaderResource = true;
+            d.debugName = "prefilter";
+            d.initialState = ResourceStates::ShaderResource;
+            d.keepInitialState = true;
+            texPrefilterCube = dev->createTexture(d);
+            runOneShot([&](ICommandList* cl) {
+                for (u32 mip = 0; mip < kEnvMipLevels; ++mip) {
+                    const u32 fs = 16u >> mip;
+                    if (fs == 0) break;
+                    std::vector<f32> px(static_cast<size_t>(fs) * fs * 4u, 0.5f);
+                    px[3] = 1.f;
+                    for (u32 face = 0; face < 6; ++face)
+                        cl->writeTexture(texPrefilterCube, face, mip, px.data(),
+                                         static_cast<size_t>(fs) * 4u * sizeof(f32));
+                }
+            });
+        }
+
+        // BRDF integration LUT (split-sum scale/bias), computed once on the CPU.
+        {
+            const std::vector<f32> lut = build_brdf_lut(static_cast<int>(kBrdfLutSize), 512);
+            TextureDesc d;
+            d.width = kBrdfLutSize;
+            d.height = kBrdfLutSize;
+            d.format = Format::RG32_FLOAT;
+            d.dimension = TextureDimension::Texture2D;
+            d.isShaderResource = true;
+            d.debugName = "brdfLUT";
+            d.initialState = ResourceStates::ShaderResource;
+            d.keepInitialState = true;
+            texBrdfLUT = dev->createTexture(d);
+            runOneShot([&](ICommandList* cl) {
+                cl->writeTexture(texBrdfLUT, 0, 0, lut.data(),
+                                 static_cast<size_t>(kBrdfLutSize) * 2u * sizeof(f32));
+            });
+        }
+
         cbLight = createCB(sizeof(LightUBO), "cbLight");
         cbSSAO = createCB(sizeof(SSAOUBO), "cbSSAO");
         cbBlur = createCB(sizeof(BlurUBO), "cbBlur");
@@ -706,6 +772,8 @@ struct VulkanRenderer::Impl {
             BindingSetItem::Texture_SRV(5, texSSAOBlurred), BindingSetItem::Sampler(5, sampLinear),
             BindingSetItem::Texture_SRV(6, texShadow), BindingSetItem::Sampler(6, sampNearest),
             BindingSetItem::Texture_SRV(7, texIrradianceCube), BindingSetItem::Sampler(7, sampLinear),
+            BindingSetItem::Texture_SRV(8, texPrefilterCube), BindingSetItem::Sampler(8, sampPrefilter),
+            BindingSetItem::Texture_SRV(9, texBrdfLUT), BindingSetItem::Sampler(9, sampLinear),
         });
         setLightingUBO = makeSet(layoutLightingUBO, {BindingSetItem::ConstantBuffer(0, cbLight)});
         setSSAO = makeSet(layoutSSAO, {
@@ -982,6 +1050,10 @@ Result<void> VulkanRenderer::set_environment_hdr(const std::string& path) {
     if (!hdr || !hdr->hdr)
         return Result<void>::failure("cannot load HDR equirect '" + path + "'");
     const Cubemap cube = equirect_to_irradiance(*hdr, 32, 64);
+    const auto prefiltered = equirect_to_prefiltered(*hdr, static_cast<int>(kPrefilterFaceSize),
+                                                     static_cast<int>(kEnvMipLevels), 512);
+    if (prefiltered.size() != kEnvMipLevels)
+        return Result<void>::failure("failed to prefilter HDR environment '" + path + "'");
     TextureDesc d;
     d.width = 32;
     d.height = 32;
@@ -998,6 +1070,33 @@ Result<void> VulkanRenderer::set_environment_hdr(const std::string& path) {
         for (u32 face = 0; face < 6; ++face) {
             cl->writeTexture(I.texIrradianceCube, face, 0,
                              cube.faces.data() + face * faceFloats, 32u * 4u * sizeof(f32));
+        }
+    });
+
+    // Prefiltered radiance cubemap: one mip per roughness level.
+    TextureDesc pd;
+    pd.width = kPrefilterFaceSize;
+    pd.height = kPrefilterFaceSize;
+    pd.arraySize = 6;
+    pd.mipLevels = kEnvMipLevels;
+    pd.format = Format::RGBA32_FLOAT;
+    pd.dimension = TextureDimension::TextureCube;
+    pd.isShaderResource = true;
+    pd.debugName = "prefilter";
+    pd.initialState = ResourceStates::ShaderResource;
+    pd.keepInitialState = true;
+    I.texPrefilterCube = I.dev->createTexture(pd);
+    I.runOneShot([&](ICommandList* cl) {
+        for (u32 mip = 0; mip < kEnvMipLevels; ++mip) {
+            const u32 fs = kPrefilterFaceSize >> mip;
+            if (fs == 0) break;
+            const Cubemap& level = prefiltered[mip];
+            const size_t levelFaceFloats = static_cast<size_t>(fs) * fs * 4u;
+            for (u32 face = 0; face < 6; ++face) {
+                cl->writeTexture(I.texPrefilterCube, face, mip,
+                                 level.faces.data() + face * levelFaceFloats,
+                                 static_cast<size_t>(fs) * 4u * sizeof(f32));
+            }
         }
     });
     I.updateLightingSets();
@@ -1069,10 +1168,15 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         }
         break;
     }
-    // Light view-projection: ortho box around origin.
-    const math::Vec3 lightPos = -lightDir * 50.f;
-    const math::Mat4 lightView = math::look_at(lightPos, math::Vec3(0.f), math::Vec3(0.f, 1.f, 0.f));
-    const math::Mat4 lightProj = ortho_vk(-30.f, 30.f, -30.f, 30.f, 0.1f, 200.f);
+    // Light view-projection: ortho box centered on the camera, so shadows stay
+    // crisp near the viewer instead of being fixed around the world origin.
+    constexpr f32 kShadowBoxHalf = 30.f;
+    constexpr f32 kShadowZNear = 0.1f, kShadowZFar = 200.f;
+    const math::Vec3 lightCenter = camera.position;
+    const math::Vec3 lightPos = lightCenter - lightDir * 50.f;
+    const math::Mat4 lightView = math::look_at(lightPos, lightCenter, math::Vec3(0.f, 1.f, 0.f));
+    const math::Mat4 lightProj = ortho_vk(-kShadowBoxHalf, kShadowBoxHalf, -kShadowBoxHalf,
+                                           kShadowBoxHalf, kShadowZNear, kShadowZFar);
     const math::Mat4 lightViewProj = lightProj * lightView;
 
     // Acquire swapchain image (windowed) before recording. We wait on a fence
@@ -1103,8 +1207,14 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         lu.lightColor = lightColor;
         lu.lightViewProj = lightViewProj;
         lu.shadowMapInvSize = math::Vec2(1.f / 2048.f);
+        lu.shadowDepthRange = math::Vec2(kShadowZNear, kShadowZFar - kShadowZNear);
         lu.shadowBias = 0.005f;
         lu.ambientStrength = 1.f;
+        lu.envMipLevels = static_cast<f32>(kEnvMipLevels);
+        lu.shadowSearchTexels = 6.f;
+        lu.shadowMaxPenumbra = 16.f;
+        lu.shadowLightSize = 4.f;
+        lu.shadowBoxWidth = 2.f * kShadowBoxHalf;
         // clear color from active camera component
         lu.clearColor = math::Vec4(0.02f, 0.02f, 0.03f, 1.f);
         for (EntityId e : scene.world().view<CameraComponent>()) {
