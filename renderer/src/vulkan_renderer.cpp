@@ -9,9 +9,11 @@
 #include "ignis/renderer/ibl.h"
 #include "ignis/scene/scene.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <random>
 
 #ifdef IGNIS_RENDERER_VULKAN
@@ -91,6 +93,11 @@ constexpr u32 kBrdfLutSize = 128;
 // Fixed-capacity light lists in LightUBO (std140 vec4 arrays in the shader).
 constexpr u32 kMaxPointLights = 8;
 constexpr u32 kMaxSpotLights = 4;
+// CSM: the shadow map is a kShadowMapSize x (kShadowMapSize * kCascadeCount)
+// atlas, one kShadowMapSize^2 slice per cascade.
+constexpr u32 kShadowMapSize = 2048;
+constexpr u32 kCascadeCount = 4;
+constexpr f32 kShadowFar = 100.f; // max view distance covered by the cascades
 
 struct LightUBO {
     alignas(16) math::Vec3 camPos;
@@ -99,16 +106,14 @@ struct LightUBO {
     f32 lightIntensity;
     alignas(16) math::Vec3 lightColor;
     f32 _pad1;
-    alignas(16) math::Mat4 lightViewProj;
-    alignas(8) math::Vec2 shadowMapInvSize;
-    alignas(8) math::Vec2 shadowDepthRange; // x = znear, y = zfar - znear of the light ortho
+    alignas(16) math::Mat4 lightViewProj;   // cascade 0 matrix (legacy single-map path)
+    alignas(8) math::Vec2 shadowMapInvSize; // 1 / slice size (both axes)
     f32 shadowBias;
     f32 ambientStrength;
     f32 envMipLevels;
     f32 shadowSearchTexels;
     f32 shadowMaxPenumbra;
     f32 shadowLightSize;
-    f32 shadowBoxWidth;
     f32 _pad2;
     alignas(16) math::Vec4 clearColor;
     // Local lights (unshadowed). Arrays are fixed-size std140 vec4s.
@@ -120,7 +125,14 @@ struct LightUBO {
     alignas(16) math::Vec4 spotInnerRange[kMaxSpotLights]; // x = cos(inner angle), y = range
     alignas(8) math::Vec2 lightCounts;                     // x = point count, y = spot count
     f32 _pad3, _pad4;
+    alignas(16) math::Mat4 camView;                        // camera view (cascade selection)
+    alignas(16) math::Mat4 cascadeViewProj[kCascadeCount]; // per-cascade light view-proj
+    alignas(16) math::Vec4 cascadeSplits;    // xyz = split distances 1..3, w = far (view space)
+    alignas(16) math::Vec4 shadowCascade;    // x = active cascade count (1 = single-map fallback)
+    alignas(16) math::Vec4 cascadeFrustum[kCascadeCount];  // x = znear, y = zspan, z = box width
 };
+// Must match the std140 layout of the UniformBuffer in lighting.frag.
+static_assert(sizeof(LightUBO) == 1120, "LightUBO/std140 layout drifted");
 
 struct SSAOUBO {
     alignas(16) math::Mat4 proj;
@@ -154,6 +166,54 @@ math::Mat4 ortho_vk(f32 l, f32 r, f32 b, f32 t, f32 znear, f32 zfar) {
     m[3][1] = (t + b) / (b - t);
     m[3][2] = znear / (znear - zfar);
     return m;
+}
+
+struct CascadeFrustum {
+    math::Mat4 viewProj;
+    math::Vec4 frustum; // x = znear, y = zspan, z = box width
+};
+
+// One CSM cascade: an ortho light projection fitted around the camera frustum
+// slice [z0, z1] (view-space distances), texel-snapped so shadows don't swim.
+CascadeFrustum compute_cascade(const math::Mat4& camWorld, f32 aspect, f32 fov_y_rad,
+                               const math::Vec3& lightDir, f32 z0, f32 z1) {
+    const f32 tanHalf = glm::tan(fov_y_rad * 0.5f);
+    math::Vec3 corners[8];
+    u32 n = 0;
+    for (u32 zi = 0; zi < 2; ++zi) {
+        const f32 z = zi == 0 ? z0 : z1;
+        const f32 halfH = tanHalf * z;
+        const f32 halfW = halfH * aspect;
+        for (const f32 sx : {-1.f, 1.f})
+            for (const f32 sy : {-1.f, 1.f})
+                corners[n++] = math::Vec3(camWorld * math::Vec4(sx * halfW, sy * halfH, -z, 1.f));
+    }
+    math::Vec3 center(0.f);
+    for (const auto& p : corners) center += p;
+    center /= 8.f;
+    const math::Mat4 lightView = math::look_at(center - lightDir * 50.f, center,
+                                               math::Vec3(0.f, 1.f, 0.f));
+    math::Vec3 mn(std::numeric_limits<f32>::max());
+    math::Vec3 mx(std::numeric_limits<f32>::lowest());
+    for (const auto& p : corners) {
+        const math::Vec3 q = math::Vec3(lightView * math::Vec4(p, 1.f));
+        mn = glm::min(mn, q);
+        mx = glm::max(mx, q);
+    }
+    const f32 radius = glm::max(mx.x - mn.x, mx.y - mn.y) * 0.5f;
+    math::Vec3 cLS = (mn + mx) * 0.5f;
+    const f32 texel = 2.f * radius / static_cast<f32>(kShadowMapSize);
+    cLS.x = std::floor(cLS.x / texel) * texel;
+    cLS.y = std::floor(cLS.y / texel) * texel;
+    // Light looks down -Z in its own view space: the closest point has the
+    // least negative z.
+    const f32 zn = -mx.z - 5.f;
+    const f32 zf = -mn.z + 5.f;
+    const math::Mat4 snap = glm::translate(math::Mat4(1.f), math::Vec3(-cLS.x, -cLS.y, 0.f));
+    CascadeFrustum out;
+    out.viewProj = ortho_vk(-radius, radius, -radius, radius, zn, zf) * snap * lightView;
+    out.frustum = math::Vec4(zn, zf - zn, 2.f * radius, 0.f);
+    return out;
 }
 
 // --- Raw Vulkan bootstrap -----------------------------------------------------
@@ -352,6 +412,7 @@ struct VulkanRenderer::Impl {
     FramebufferHandle fbGbuffer;
     TextureHandle texShadow;
     FramebufferHandle fbShadow;
+    u32 shadowCascadeCount = kCascadeCount; // 1..kCascadeCount; 1 = single-map fallback
     TextureHandle texSSAO, texSSAOBlurred;
     FramebufferHandle fbSSAO, fbBlur;
     TextureHandle texHDR;
@@ -526,7 +587,7 @@ struct VulkanRenderer::Impl {
             .addColorAttachment(texEmissive).addColorAttachment(texWorldPos).setDepthAttachment(texDepth);
         fbGbuffer = dev->createFramebuffer(fb);
 
-        texShadow = createTex2D(2048, 2048, Format::D32, true, "shadow");
+        texShadow = createTex2D(kShadowMapSize, kShadowMapSize * kCascadeCount, Format::D32, true, "shadow");
         FramebufferDesc fbs;
         fbs.setDepthAttachment(texShadow);
         fbShadow = dev->createFramebuffer(fbs);
@@ -1153,6 +1214,10 @@ void VulkanRenderer::set_debug_lines(const std::vector<DebugLine>& lines) {
     debug_lines_ = lines;
 }
 
+void VulkanRenderer::set_shadow_cascade_count(u32 count) {
+    if (impl_) impl_->shadowCascadeCount = std::clamp(count, 1u, kCascadeCount);
+}
+
 void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
     (void)dt;
     if (!impl_ || !impl_->dev) return;
@@ -1180,16 +1245,23 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         }
         break;
     }
-    // Light view-projection: ortho box centered on the camera, so shadows stay
-    // crisp near the viewer instead of being fixed around the world origin.
-    constexpr f32 kShadowBoxHalf = 30.f;
-    constexpr f32 kShadowZNear = 0.1f, kShadowZFar = 200.f;
-    const math::Vec3 lightCenter = camera.position;
-    const math::Vec3 lightPos = lightCenter - lightDir * 50.f;
-    const math::Mat4 lightView = math::look_at(lightPos, lightCenter, math::Vec3(0.f, 1.f, 0.f));
-    const math::Mat4 lightProj = ortho_vk(-kShadowBoxHalf, kShadowBoxHalf, -kShadowBoxHalf,
-                                           kShadowBoxHalf, kShadowZNear, kShadowZFar);
-    const math::Mat4 lightViewProj = lightProj * lightView;
+    // CSM: split the camera frustum into cascades and fit one texel-snapped
+    // ortho light projection per slice. count=1 degrades to a single map.
+    u32 activeCascades = std::min(I.shadowCascadeCount, kCascadeCount);
+    std::vector<f32> splits = cascade_splits(camera.z_near, std::min(camera.z_far, kShadowFar),
+                                              activeCascades, 0.6f);
+    if (splits.size() != static_cast<size_t>(activeCascades) + 1u) {
+        // Invalid camera range: fall back to one full-range cascade.
+        const f32 zn = camera.z_near > 0.f ? camera.z_near : 0.1f;
+        splits.assign({zn, std::max(camera.z_far, zn + 1.f)});
+        activeCascades = 1;
+    }
+    const math::Mat4 camWorld = glm::inverse(view);
+    const f32 fovY = glm::radians(camera.fov_y_deg);
+    CascadeFrustum cascades[kCascadeCount];
+    for (u32 c = 0; c < activeCascades; ++c)
+        cascades[c] = compute_cascade(camWorld, aspect, fovY, lightDir, splits[c], splits[c + 1]);
+    const math::Mat4 lightViewProj = cascades[0].viewProj; // legacy single-map path
 
     // Acquire swapchain image (windowed) before recording. We wait on a fence
     // here and present after waitForIdle below, so no semaphores are needed:
@@ -1218,15 +1290,24 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         lu.lightIntensity = lightIntensity;
         lu.lightColor = lightColor;
         lu.lightViewProj = lightViewProj;
-        lu.shadowMapInvSize = math::Vec2(1.f / 2048.f);
-        lu.shadowDepthRange = math::Vec2(kShadowZNear, kShadowZFar - kShadowZNear);
+        lu.shadowMapInvSize = math::Vec2(1.f / static_cast<f32>(kShadowMapSize));
         lu.shadowBias = 0.005f;
         lu.ambientStrength = 1.f;
         lu.envMipLevels = static_cast<f32>(kEnvMipLevels);
         lu.shadowSearchTexels = 6.f;
         lu.shadowMaxPenumbra = 16.f;
         lu.shadowLightSize = 4.f;
-        lu.shadowBoxWidth = 2.f * kShadowBoxHalf;
+        lu.camView = view;
+        for (u32 c = 0; c < kCascadeCount; ++c) {
+            const u32 src = c < activeCascades ? c : 0;
+            lu.cascadeViewProj[c] = cascades[src].viewProj;
+            lu.cascadeFrustum[c] = cascades[src].frustum;
+        }
+        const auto splitAt = [&](size_t i) -> f32 {
+            return i < splits.size() ? splits[i] : splits.back();
+        };
+        lu.cascadeSplits = math::Vec4(splitAt(1), splitAt(2), splitAt(3), splitAt(splits.size() - 1));
+        lu.shadowCascade = math::Vec4(static_cast<f32>(activeCascades), 0.f, 0.f, 0.f);
         // Local lights: fixed-capacity lists (world position from the transform).
         u32 pointCount = 0;
         for (EntityId e : scene.world().view<PointLightComponent, TransformComponent>()) {
@@ -1328,27 +1409,34 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         gs.setViewport(vs);
     };
 
-    // --- shadow pass -------------------------------------------------------------
+    // --- shadow pass (one atlas slice per cascade) ---------------------------------
     if (castShadow) {
         cl->clearDepthStencilTexture(I.texShadow, TextureSubresourceSet(), true, 1.f, false, 0);
-        for (const auto& d : draws) {
-            ShadowPush push{};
-            push.lightViewProj = lightViewProj;
-            push.model = d.model;
-            GraphicsState gs;
-            gs.setPipeline(I.psoShadow);
-            gs.setFramebuffer(I.fbShadow);
-            gs.addBindingSet(I.setPushShadow);
-            gs.addVertexBuffer({d.mesh->vb, 0, 0});
-            gs.setIndexBuffer({d.mesh->ib, Format::R32_UINT, 0});
-            setViewport(gs);
-            cl->setGraphicsState(gs);
-            cl->setPushConstants(&push, sizeof(push));
-            for (const auto& prim : d.mesh->prims) {
-                DrawArguments args;
-                args.vertexCount = prim.indexCount; // index count for drawIndexed
-                args.startIndexLocation = prim.firstIndex;
-                cl->drawIndexed(args);
+        for (u32 c = 0; c < activeCascades; ++c) {
+            for (const auto& d : draws) {
+                ShadowPush push{};
+                push.lightViewProj = cascades[c].viewProj;
+                push.model = d.model;
+                GraphicsState gs;
+                gs.setPipeline(I.psoShadow);
+                gs.setFramebuffer(I.fbShadow);
+                gs.addBindingSet(I.setPushShadow);
+                gs.addVertexBuffer({d.mesh->vb, 0, 0});
+                gs.setIndexBuffer({d.mesh->ib, Format::R32_UINT, 0});
+                ViewportState vs;
+                Viewport vp(static_cast<f32>(kShadowMapSize), static_cast<f32>(kShadowMapSize));
+                vp.minY = static_cast<f32>(c * kShadowMapSize);
+                vp.maxY = static_cast<f32>((c + 1) * kShadowMapSize);
+                vs.addViewportAndScissorRect(vp);
+                gs.setViewport(vs);
+                cl->setGraphicsState(gs);
+                cl->setPushConstants(&push, sizeof(push));
+                for (const auto& prim : d.mesh->prims) {
+                    DrawArguments args;
+                    args.vertexCount = prim.indexCount; // index count for drawIndexed
+                    args.startIndexLocation = prim.firstIndex;
+                    cl->drawIndexed(args);
+                }
             }
         }
     }

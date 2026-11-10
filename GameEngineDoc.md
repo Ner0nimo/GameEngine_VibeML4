@@ -52,8 +52,10 @@ We're building a production-grade, simple and straight-forward 3D Game Engine fo
 - IBL with HDRIs from https://polyhaven.com/hdris (diffuse irradiance +
   mipmapped prefiltered radiance cubemap + BRDF LUT for roughness-correct
   specular reflections, built on CPU at load time)
-- Soft shadow maps (PCSS: blocker search + penumbra-scaled PCF, frustum
-  follows the camera)
+- Soft shadow maps: 4 cascaded shadow maps (CSM atlas, practical splits,
+  texel snapping, cross-cascade blending) with PCSS per cascade (blocker
+  search + penumbra-scaled PCF); 1-cascade fallback via
+  `set_shadow_cascade_count(1)`
 - Good SSAO
 - HDR pipeline with tonemapping
 

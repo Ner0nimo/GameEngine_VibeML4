@@ -6,6 +6,25 @@
 #include <limits>
 #include <algorithm>
 
+namespace ignis {
+
+std::vector<f32> cascade_splits(f32 z_near, f32 z_far, u32 count, f32 lambda) {
+    if (z_near <= 0.f || z_far <= z_near || count == 0) return {};
+    std::vector<f32> splits(static_cast<size_t>(count) + 1u);
+    splits[0] = z_near;
+    splits[count] = z_far;
+    const f32 l = glm::clamp(lambda, 0.f, 1.f);
+    for (u32 i = 1; i < count; ++i) {
+        const f32 p = static_cast<f32>(i) / static_cast<f32>(count);
+        const f32 log_s = z_near * std::pow(z_far / z_near, p);
+        const f32 uni = z_near + (z_far - z_near) * p;
+        splits[i] = l * log_s + (1.f - l) * uni;
+    }
+    return splits;
+}
+
+} // namespace ignis
+
 namespace ignis::picking {
 
 Ray screen_ray(const Camera& cam, f32 aspect, f32 ndc_x, f32 ndc_y) {
