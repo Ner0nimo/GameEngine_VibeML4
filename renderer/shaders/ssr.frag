@@ -42,7 +42,6 @@ float rayDiff(vec3 p, vec2 uv) {
 }
 
 void main() {
-    if (ubo.params.x > 0.5) { rt_ssr = vec4(1.0, 0.0, 0.0, 1.0); return; } // DEBUG unconditional
     float depth = texture(sampler2D(tex_depth, samp_depth), v_uv).r;
     if (depth >= 1.0 || ubo.params.x < 0.5) { rt_ssr = vec4(0.0); return; } // sky / disabled
     float roughness = clamp(texture(sampler2D(tex_orm, samp_orm), v_uv).g, 0.04, 1.0);
