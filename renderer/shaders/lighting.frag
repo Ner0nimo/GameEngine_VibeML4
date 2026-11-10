@@ -244,6 +244,6 @@ void main() {
     vec3 ambientSpec = prefiltered * (Famb * brdf.x + brdf.y);
     vec3 ambient = (ambientDiffuse + ambientSpec) * ao * ssao * ubo.ambientStrength;
 
-    vec3 color = ambient + direct + emissive;
+    vec3 color = direct; // DEBUG: isolate the direct-light term
     rt_hdr = vec4(color, 1.0);
 }
