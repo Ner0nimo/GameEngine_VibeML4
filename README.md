@@ -62,3 +62,7 @@ function on_destroy(self) ... end
 
 Every editor action is a JSON command (`ignis/agent/commands.h`), e.g.
 `{"cmd": "create_entity", "name": "Player"}` — batch files via `--commands x.jsonl`.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Ner0nimo.
