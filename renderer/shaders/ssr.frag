@@ -52,16 +52,15 @@ void main() {
     vec3 viewPos = vec3(ubo.camView * vec4(worldPos, 1.0));
     vec3 Nv = normalize(mat3(ubo.camView) * N);
     vec3 Rv = reflect(normalize(viewPos), Nv); // mirror dir in view space
-    if (Rv.z >= -0.02) { rt_ssr = vec4(0.0, 0.0, 0.0, 0.0); return; } // DEBUG: dir-rejected
-    rt_ssr = vec4(0.0, 0.0, 0.0, 0.25); // DEBUG: dir ok, before march
+    if (Rv.z >= -0.02) { rt_ssr = vec4(0.0); return; } // grazing / toward camera
 
     vec3 V = normalize(ubo.camPos.xyz - worldPos);
     float NdotV = clamp(dot(N, V), 0.0, 1.0);
     // Start offset grows at grazing angles so the ray doesn't immediately
     // re-hit its own surface.
     const float t0 = 0.05 + (1.0 - NdotV) * 0.5;
-    const float tMax = ubo.params.w;
-    const int STEPS = 48;
+    const float tMax = min(ubo.params.w, 25.0);
+    const int STEPS = 128;
     const float THICKNESS = 0.15;
 
     // March and register a hit on a SIGN CHANGE (in-front -> behind), so a
@@ -72,6 +71,7 @@ void main() {
     // changing the crossing/refine/blend logic.)
     float prevT = t0;
     float prevDiff = 1e9;
+    float maxDiff = -1e9; // DEBUG
     float hitT = -1.0;
     vec2 hitUV = vec2(0.0);
     for (int i = 0; i < STEPS; ++i) {
@@ -81,6 +81,7 @@ void main() {
         if (!project(p, uv)) break;
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break; // off-screen
         float diff = rayDiff(p, uv);
+        maxDiff = max(maxDiff, diff); // DEBUG
         // i > 0: the first sample sits on the source surface itself (self-crossing).
         if (i > 0 && prevDiff > 0.0 && diff <= 0.0) {
             float lo = prevT, hi = tt;
@@ -98,7 +99,7 @@ void main() {
         prevT = tt;
         prevDiff = diff;
     }
-    if (hitT < 0.0) return; // DEBUG: keeps 0.25 (dir ok, no hit)
+    if (hitT < 0.0) { rt_ssr = vec4(0.0, 0.0, 0.0, clamp(maxDiff * 0.5, 0.0, 1.0)); return; } // DEBUG: no hit, encode maxDiff
 
     // Confidence: screen-edge fade, ray-length fade, grazing-angle fade.
     float edge = smoothstep(0.0, 0.05, min(min(hitUV.x, 1.0 - hitUV.x), min(hitUV.y, 1.0 - hitUV.y)));
@@ -106,5 +107,5 @@ void main() {
     float confidence = edge * rayFade * NdotV;
 
     vec3 refl = texture(sampler2D(tex_hdr_prev, samp_hdr_prev), hitUV).rgb;
-    rt_ssr = vec4(refl, 1.0); // DEBUG: hit
+    rt_ssr = vec4(refl, confidence);
 }
