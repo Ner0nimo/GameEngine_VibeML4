@@ -15,8 +15,12 @@
 #ifdef IGNIS_RENDERER_VULKAN
 #include "ignis/physics/physics_world.h"
 #include "ignis/renderer/vulkan_renderer.h"
+#include "ignis/window/window.h"
 #include <vulkan/vulkan.h>
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -390,6 +394,93 @@ TEST(Render, TestSceneOffscreenRenders) {
     renderer.shutdown();
 }
 
+// Issue #53 regression test: offscreen targets must be recreated on resize,
+// and rendering + readback must work at the new size (both up and down).
+TEST(Render, OffscreenResize) {
+    if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
+    Scene scene = make_render_scene();
+    Camera camera;
+    camera.position = {0.f, 0.f, 3.f};
+    camera.fov_y_deg = 60.f;
+
+    VulkanRenderer renderer;
+    ASSERT_TRUE(renderer.init_offscreen(64, 64).ok());
+    renderer.render(scene, camera, 1.f / 60.f);
+    auto rb1 = renderer.readback();
+    ASSERT_TRUE(rb1.ok()) << rb1.error();
+    ASSERT_EQ(rb1.value().size(), 64u * 64u * 4u);
+
+    // Grow.
+    renderer.on_resize(128, 96);
+    renderer.render(scene, camera, 1.f / 60.f);
+    auto rb2 = renderer.readback();
+    ASSERT_TRUE(rb2.ok()) << rb2.error();
+    ASSERT_EQ(rb2.value().size(), 128u * 96u * 4u);
+    {
+        const std::vector<u8>& px = rb2.value();
+        const size_t i = (48u * 128u + 64u) * 4; // center of 128x96
+        const u32 center = static_cast<u32>(px[i]) + px[i + 1] + px[i + 2];
+        EXPECT_GT(center, 200u) << "cube must still be lit after resize";
+    }
+
+    // Shrink.
+    renderer.on_resize(48, 32);
+    renderer.render(scene, camera, 1.f / 60.f);
+    auto rb3 = renderer.readback();
+    ASSERT_TRUE(rb3.ok()) << rb3.error();
+    EXPECT_EQ(rb3.value().size(), 48u * 32u * 4u);
+    renderer.shutdown();
+}
+
+// Issue #53 windowed path: a framebuffer resize event must lead to a swapchain
+// recreation on the next render() (no crash, new extent reported). Fork-guarded
+// because it needs a real window + driver.
+TEST(Render, WindowedResizeRecreatesSwapchain) {
+    if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
+    if (!std::getenv("DISPLAY") && !std::getenv("WAYLAND_DISPLAY"))
+        GTEST_SKIP() << "no display available";
+    const pid_t pid = fork();
+    ASSERT_NE(pid, -1);
+    if (pid == 0) {
+        WindowProps props;
+        props.title = "ignis-resize-test";
+        props.width = 320;
+        props.height = 240;
+        props.visible = false;
+        Window win(props);
+        if (!win.init().ok()) _exit(2);
+        VulkanRenderer r;
+        if (!r.init(&win).ok()) _exit(3);
+        win.on_resize = [&](u32 w, u32 h) { r.request_resize(w, h); };
+        Scene scene = make_render_scene();
+        Camera camera;
+        camera.position = {0.f, 0.f, 3.f};
+        camera.fov_y_deg = 60.f;
+        r.render(scene, camera, 1.f / 60.f);
+        r.present();
+        const RawVulkanHandles h0 = r.raw_handles();
+        if (!h0.windowed) _exit(4);
+        // Really resize the window; the framebuffer-size callback fires during
+        // poll_events and records a pending resize, which the next render()
+        // must process by recreating the swapchain.
+        glfwSetWindowSize(win.handle(), static_cast<int>(h0.width / 2),
+                          static_cast<int>(h0.height / 2));
+        for (int i = 0; i < 10; ++i) win.poll_events();
+        r.render(scene, camera, 1.f / 60.f);
+        r.present();
+        const RawVulkanHandles h1 = r.raw_handles();
+        if (!h1.windowed) _exit(5);
+        if (h1.width >= h0.width || h1.height >= h0.height) _exit(6); // must have shrunk
+        r.shutdown();
+        win.shutdown();
+        _exit(0);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        << "child status=" << status << " (2=no window, 3=no renderer, 4/5=not windowed, 6=extent did not shrink)";
+}
+
 #else
 
 TEST(Render, OffscreenCubeLit) {
@@ -405,6 +496,12 @@ TEST(Render, DebugLinesDrawn) {
     GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
 }
 TEST(Render, TestSceneOffscreenRenders) {
+    GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
+}
+TEST(Render, OffscreenResize) {
+    GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
+}
+TEST(Render, WindowedResizeRecreatesSwapchain) {
     GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
 }
 

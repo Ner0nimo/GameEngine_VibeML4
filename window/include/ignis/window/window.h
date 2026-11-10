@@ -23,6 +23,19 @@ struct FramebufferSize {
     u32 height = 0;
 };
 
+// Logical window size in screen coordinates (differs from the framebuffer
+// size on HiDPI displays, e.g. 1920x1080 window on a 3840x2160 framebuffer).
+struct WindowSize {
+    u32 width = 0;
+    u32 height = 0;
+};
+
+// DPI content scale factor (1.0 = 100%, 2.0 = 200%).
+struct ContentScale {
+    f32 x = 1.f;
+    f32 y = 1.f;
+};
+
 // Thin GLFW wrapper. The window is created with GLFW_NO_API (Vulkan); the
 // renderer owns the swapchain.
 class Window {
@@ -42,9 +55,14 @@ public:
     void request_close();
 
     GLFWwindow* handle() const { return window_; }
+    // Logical window size (screen coordinates).
+    WindowSize window_size() const;
     u32 width() const { return props_.width; }
     u32 height() const { return props_.height; }
+    // Framebuffer size in pixels - this is what the renderer/swapchain uses.
     FramebufferSize framebuffer_size() const;
+    // DPI content scale of the monitor the window is on.
+    ContentScale content_scale() const;
     f64 time() const { return time_; }
     f32 delta_time() const { return dt_; }
 
@@ -53,7 +71,10 @@ public:
     std::function<void(f64 x, f64 y)> on_cursor_pos;
     std::function<void(int button, int action, int mods)> on_mouse_button;
     std::function<void(f64 x, f64 y)> on_scroll;
+    // Fired with the new FRAMEBUFFER size in pixels (not logical window size).
     std::function<void(u32 w, u32 h)> on_resize;
+    // Fired when the window's DPI content scale changes (monitor change/zoom).
+    std::function<void(f32 x, f32 y)> on_content_scale_changed;
 
 #if defined(IGNIS_WINDOW_VULKAN)
     // Creates a VkSurfaceKHR for this window. `instance` is a VkInstance.
@@ -67,6 +88,8 @@ private:
     static void mouse_button_trampoline(GLFWwindow* w, int button, int action, int mods);
     static void scroll_trampoline(GLFWwindow* w, double x, double y);
     static void resize_trampoline(GLFWwindow* win, int width, int height);
+    static void window_size_trampoline(GLFWwindow* win, int width, int height);
+    static void content_scale_trampoline(GLFWwindow* win, float x, float y);
 
     WindowProps props_;
     GLFWwindow* window_ = nullptr;
