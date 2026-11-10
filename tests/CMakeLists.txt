@@ -14,6 +14,8 @@ add_executable(ignis_tests
     src/test_picking_ibl.cpp
     src/test_render.cpp
     src/test_integration_scene.cpp
+    src/test_export.cpp
+    src/test_runtime_limits.cpp
 )
 
 target_link_libraries(ignis_tests PRIVATE
@@ -35,6 +37,19 @@ target_compile_definitions(ignis_tests PRIVATE
     IGNIS_SCENES_DIR="${CMAKE_SOURCE_DIR}/scenes"
     IGNIS_SCRIPTS_DIR="${CMAKE_SOURCE_DIR}/scripts"
 )
+
+# Process-level security tests (export verification, runtime limits) drive the
+# built executables directly.
+if(TARGET ignis_runtime)
+    target_compile_definitions(ignis_tests PRIVATE IGNIS_RUNTIME_EXE="$<TARGET_FILE:ignis_runtime>")
+endif()
+if(TARGET ignis_export)
+    target_compile_definitions(ignis_tests PRIVATE IGNIS_EXPORTER_EXE="$<TARGET_FILE:ignis_export>")
+endif()
+
+if(IGNIS_FUZZING)
+    add_subdirectory(fuzz)
+endif()
 
 # gtest headers as SYSTEM includes so our -Werror never fires inside them.
 target_include_directories(ignis_tests SYSTEM PRIVATE

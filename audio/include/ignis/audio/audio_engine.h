@@ -81,6 +81,7 @@ private:
     struct SoundEntry {
         ma_sound* sound = nullptr;
         ma_decoder* decoder = nullptr; // owned, only for play_memory()
+        std::vector<u8> bytes;         // owned encoded data the decoder reads from
     };
 
     ma_engine* engine_ = nullptr;
@@ -88,6 +89,8 @@ private:
     bool initialized_ = false;
     bool null_device_ = false;
     AssetManager* assets_ = nullptr;
+    Result<u32> play_memory_owned(std::vector<u8> bytes, f32 volume, bool loop);
+
     std::unordered_map<u32, SoundEntry> sounds_;
     u32 next_id_ = 1;
     static AudioEngine* active_;

@@ -125,3 +125,328 @@ TEST(Scripting, BadScriptReportsError) {
     EXPECT_TRUE(scene.world().alive(e));
     std::filesystem::remove(path);
 }
+
+namespace {
+
+bool entity_named_exists(Scene& scene, const std::string& name) {
+    for (EntityId id : scene.world().all_entities()) {
+        if (scene.world().name_of(id) == name) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+TEST(LuaIsolation, HostLibrariesUnavailableToScripts) {
+    Scene scene("iso");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string path = write_script("ignis_iso_host.lua", R"LUA(
+function on_create(self)
+    if io == nil and os == nil and package == nil and debug == nil
+       and coroutine == nil and dofile == nil and loadfile == nil and load == nil
+       and _G.io == nil and _G.os == nil then
+        ignis.entity.create("sandbox_ok")
+    else
+        ignis.entity.create("sandbox_fail")
+    end
+end
+)LUA");
+    EntityId e = scene.world().create_entity("s");
+    scene.world().emplace<ScriptComponent>(e).path = path;
+    scripts.update(0.016f);
+    EXPECT_TRUE(entity_named_exists(scene, "sandbox_ok"));
+    EXPECT_FALSE(entity_named_exists(scene, "sandbox_fail"));
+    std::filesystem::remove(path);
+}
+
+TEST(LuaIsolation, EnvironmentsArePrivatePerScript) {
+    Scene scene("iso2");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string path_a = write_script("ignis_iso_a.lua", R"LUA(
+function on_create(self)
+    secret_marker = 42 -- lands in this script's own env, not _G
+end
+)LUA");
+    const std::string path_b = write_script("ignis_iso_b.lua", R"LUA(
+function on_create(self)
+    if secret_marker == nil and rawget(_G, "secret_marker") == nil then
+        ignis.entity.create("isolated_ok")
+    else
+        ignis.entity.create("isolated_fail")
+    end
+end
+)LUA");
+    EntityId a = scene.world().create_entity("a");
+    scene.world().emplace<ScriptComponent>(a).path = path_a;
+    EntityId b = scene.world().create_entity("b");
+    scene.world().emplace<ScriptComponent>(b).path = path_b;
+    scripts.update(0.016f);
+    EXPECT_TRUE(entity_named_exists(scene, "isolated_ok"));
+    EXPECT_FALSE(entity_named_exists(scene, "isolated_fail"));
+    std::filesystem::remove(path_a);
+    std::filesystem::remove(path_b);
+}
+
+TEST(LuaIsolation, RunawayScriptAbortedByInstructionBudget) {
+    Scene scene("budget");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    scripts.set_instruction_budget(20000); // tiny budget: must abort quickly
+    const std::string bad_path = write_script("ignis_runaway.lua", R"LUA(
+function on_update(self, dt)
+    while true do end
+end
+)LUA");
+    const std::string good_path = write_script("ignis_good.lua", R"LUA(
+function on_update(self, dt)
+    if ignis.frame() == 2 then
+        ignis.entity.create("good_ok")
+    end
+end
+)LUA");
+    EntityId bad = scene.world().create_entity("bad");
+    scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+    EntityId good = scene.world().create_entity("good");
+    scene.world().emplace<ScriptComponent>(good).path = good_path;
+    for (int i = 0; i < 3; ++i) scripts.update(0.016f); // must return, not hang
+    EXPECT_TRUE(entity_named_exists(scene, "good_ok"));   // engine still functional
+    EXPECT_TRUE(scene.world().alive(bad));                 // error swallowed, entity intact
+    std::filesystem::remove(bad_path);
+    std::filesystem::remove(good_path);
+}
+
+TEST(LuaIsolation, CyclicTableConversionIsAControlledError) {
+    Scene scene("cyclic");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string bad_path = write_script("ignis_cyclic.lua", R"LUA(
+function on_create(self)
+    local t = {}
+    t.self_ref = t
+    ignis.entity.add_component(self.entity, "Transform", t) -- cyclic table
+end
+)LUA");
+    const std::string good_path = write_script("ignis_cyclic_good.lua", R"LUA(
+function on_update(self, dt)
+    if ignis.frame() == 2 then
+        ignis.entity.create("after_cyclic_ok")
+    end
+end
+)LUA");
+    EntityId bad = scene.world().create_entity("bad");
+    scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+    EntityId good = scene.world().create_entity("good");
+    scene.world().emplace<ScriptComponent>(good).path = good_path;
+    for (int i = 0; i < 3; ++i) scripts.update(0.016f); // must not crash
+    EXPECT_TRUE(entity_named_exists(scene, "after_cyclic_ok"));
+    std::filesystem::remove(bad_path);
+    std::filesystem::remove(good_path);
+}
+
+TEST(LuaIsolation, BadScriptDoesNotCorruptEngineState) {
+    Scene scene("bad2");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string bad_path = write_script("ignis_bad2.lua", "this is not lua {{{");
+    const std::string good_path = write_script("ignis_good2.lua", R"LUA(
+function on_update(self, dt)
+    if ignis.frame() == 1 then
+        ignis.entity.create("still_works")
+    end
+end
+)LUA");
+    EntityId bad = scene.world().create_entity("bad");
+    scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+    EntityId good = scene.world().create_entity("good");
+    scene.world().emplace<ScriptComponent>(good).path = good_path;
+    for (int i = 0; i < 2; ++i) scripts.update(0.016f);
+    EXPECT_TRUE(entity_named_exists(scene, "still_works"));
+    EXPECT_TRUE(scene.world().alive(bad));
+    std::filesystem::remove(bad_path);
+    std::filesystem::remove(good_path);
+}
+
+TEST(LuaIsolation, StringAndIntegerTableKeysAccepted) {
+    Scene scene("keys_ok");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string path = write_script("ignis_keys_ok.lua", R"LUA(
+function on_create(self)
+    local t = { label = "x", [7] = 1, [42] = "y" } -- string + integer keys
+    ignis.entity.add_component(self.entity, "Transform", t)
+    ignis.entity.create("keys_ok_marker")
+end
+)LUA");
+    EntityId e = scene.world().create_entity("s");
+    scene.world().emplace<ScriptComponent>(e).path = path;
+    scripts.update(0.016f);
+    EXPECT_TRUE(entity_named_exists(scene, "keys_ok_marker")); // conversion did not error
+    std::filesystem::remove(path);
+}
+
+TEST(LuaIsolation, UnsupportedTableKeyTypesAreControlledErrors) {
+    for (const char* bad_key_case : {"[true] = 1", "[{}] = 1", "[1.5] = 1", "[print] = 1"}) {
+        Scene scene("keys_bad");
+        register_builtin_components(scene.world());
+        AssetManager assets;
+        ScriptEngine scripts;
+        ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+        const std::string bad_path = write_script("ignis_keys_bad.lua",
+            std::string("function on_create(self)\n    local t = { ") + bad_key_case +
+            " }\n    ignis.entity.add_component(self.entity, \"Transform\", t)\n    ignis.entity.create(\"should_not_happen\")\nend\n");
+        const std::string good_path = write_script("ignis_keys_good.lua", R"LUA(
+function on_update(self, dt)
+    if ignis.frame() == 2 then
+        ignis.entity.create("engine_still_ok")
+    end
+end
+)LUA");
+        EntityId bad = scene.world().create_entity("bad");
+        scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+        EntityId good = scene.world().create_entity("good");
+        scene.world().emplace<ScriptComponent>(good).path = good_path;
+        for (int i = 0; i < 3; ++i) scripts.update(0.016f); // must not crash
+        EXPECT_FALSE(entity_named_exists(scene, "should_not_happen")) << bad_key_case;
+        EXPECT_TRUE(entity_named_exists(scene, "engine_still_ok")) << bad_key_case;
+        std::filesystem::remove(bad_path);
+        std::filesystem::remove(good_path);
+    }
+}
+
+TEST(LuaIsolation, SharedGlobalsAreReadOnly) {
+    // One script must not be able to mutate the shared global table (_G) that
+    // every per-script environment inherits via __index.
+    Scene scene("ro");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    const std::string path_a = write_script("ignis_ro_a.lua", R"LUA(
+function on_create(self)
+    pcall(function() _G.pwned = 1 end) -- must fail: _G is read-only
+    own_global = 7 -- lands in this script's own env only
+end
+)LUA");
+    const std::string path_b = write_script("ignis_ro_b.lua", R"LUA(
+function on_create(self)
+    if rawget(_G, "pwned") == nil and rawget(_G, "own_global") == nil and own_global == nil then
+        ignis.entity.create("ro_ok")
+    else
+        ignis.entity.create("ro_fail")
+    end
+end
+)LUA");
+    EntityId a = scene.world().create_entity("a");
+    scene.world().emplace<ScriptComponent>(a).path = path_a;
+    EntityId b = scene.world().create_entity("b");
+    scene.world().emplace<ScriptComponent>(b).path = path_b;
+    scripts.update(0.016f);
+    EXPECT_TRUE(entity_named_exists(scene, "ro_ok"));
+    EXPECT_FALSE(entity_named_exists(scene, "ro_fail"));
+    std::filesystem::remove(path_a);
+    std::filesystem::remove(path_b);
+}
+
+TEST(LuaIsolation, MemoryBudgetAbortsAllocationBomb) {
+    // Instruction budgets don't cover memory: string.rep is one instruction.
+    // The custom allocator must fail the 64 MB allocation with a controlled
+    // Lua error instead of an OOM kill.
+    Scene scene("mem");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    scripts.set_memory_budget(1ull << 20); // 1 MB cap
+    const std::string path = write_script("ignis_mem_bomb.lua", R"LUA(
+function on_create(self)
+    local s = string.rep("A", 64 * 1024 * 1024) -- 64 MB in a single instruction
+    ignis.entity.create("bomb_succeeded") -- must NOT happen
+end
+)LUA");
+    EntityId e = scene.world().create_entity("bomber");
+    scene.world().emplace<ScriptComponent>(e).path = path;
+    scripts.update(0.016f); // controlled error, no crash, no OOM
+    EXPECT_FALSE(entity_named_exists(scene, "bomb_succeeded"));
+    EXPECT_LE(scripts.memory_used(), scripts.memory_budget());
+    std::filesystem::remove(path);
+}
+
+TEST(LuaIsolation, SceneSaveRespectsPathPolicy) {
+    // ignis.scene.save must obey the same path policy as agent commands:
+    // host paths disallowed (exported runtime) -> denied; PackageOnly asset
+    // mode -> denied; project root -> relative saves inside the root allowed,
+    // traversal denied.
+    Scene scene("savepol");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+    namespace fs = std::filesystem;
+    const fs::path tmp = fs::temp_directory_path() / "ignis_savepol";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    const std::string target = (tmp / "pwned.json").string();
+
+    std::string code = R"LUA(
+function on_update(self, dt)
+    if ignis.frame() == 2 then
+        save_abs = ignis.scene.save("__TARGET__")
+    end
+    if ignis.frame() == 4 then
+        save_rel = ignis.scene.save("out.json")
+        save_esc = ignis.scene.save("../escape.json")
+    end
+    if ignis.frame() == 6 then
+        save_pak = ignis.scene.save("pak.json")
+    end
+end
+)LUA";
+    const std::string marker = "__TARGET__";
+    const size_t pos = code.find(marker);
+    code.replace(pos, marker.size(), target);
+    const std::string path = write_script("ignis_savepol.lua", code);
+
+    EntityId e = scene.world().create_entity("s");
+    scene.world().emplace<ScriptComponent>(e).path = path;
+
+    // Phase 1 (frames 1-2): exported-runtime policy - host paths disallowed.
+    scripts.set_host_paths_allowed(false);
+    scripts.update(0.016f);
+    scripts.update(0.016f);
+    EXPECT_FALSE(fs::exists(target)) << "absolute save must be denied";
+    EXPECT_FALSE(scripts.script_env_bool(e, "save_abs"));
+
+    // Phase 2 (frames 3-4): project root = tmp, host paths allowed.
+    scripts.set_host_paths_allowed(true);
+    scripts.set_project_root(tmp.string());
+    scripts.update(0.016f);
+    scripts.update(0.016f);
+    EXPECT_TRUE(fs::exists(tmp / "out.json")) << "relative save inside root must work";
+    EXPECT_FALSE(fs::exists(tmp / ".." / "escape.json")) << "traversal must be denied";
+    EXPECT_TRUE(scripts.script_env_bool(e, "save_rel"));
+    EXPECT_FALSE(scripts.script_env_bool(e, "save_esc"));
+
+    // Phase 3 (frames 5-6): PackageOnly asset mode denies even with the flag on.
+    assets.set_access_mode(AssetAccessMode::PackageOnly);
+    scripts.update(0.016f);
+    scripts.update(0.016f);
+    EXPECT_FALSE(fs::exists(tmp / "pak.json")) << "PackageOnly must deny host writes";
+    EXPECT_FALSE(scripts.script_env_bool(e, "save_pak"));
+
+    std::filesystem::remove(path);
+    fs::remove_all(tmp);
+}

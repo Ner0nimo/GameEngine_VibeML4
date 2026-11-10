@@ -1,6 +1,10 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 27, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 27,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "headless",
@@ -40,15 +44,88 @@
         "IGNIS_BUILD_TESTS": "OFF",
         "IGNIS_BUILD_EXPORTER": "ON"
       }
+    },
+    {
+      "name": "headless-asan",
+      "displayName": "Headless with ASan+UBSan (security CI)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/headless-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -g",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -g",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
+        "IGNIS_WITH_GRAPHICS": "OFF",
+        "IGNIS_BUILD_EDITOR": "OFF",
+        "IGNIS_BUILD_TESTS": "ON",
+        "IGNIS_BUILD_EXPORTER": "ON"
+      }
+    },
+    {
+      "name": "fuzz",
+      "displayName": "libFuzzer targets (Clang, ASan+UBSan+fuzzer) for pak/scene parsers",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/fuzz",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined,fuzzer-no-link -fno-omit-frame-pointer -g",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined,fuzzer-no-link -fno-omit-frame-pointer -g",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
+        "IGNIS_WITH_GRAPHICS": "OFF",
+        "IGNIS_BUILD_EDITOR": "OFF",
+        "IGNIS_BUILD_TESTS": "ON",
+        "IGNIS_BUILD_EXPORTER": "OFF",
+        "IGNIS_FUZZING": "ON"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "headless", "configurePreset": "headless" },
-    { "name": "full", "configurePreset": "full" },
-    { "name": "release", "configurePreset": "release" }
+    {
+      "name": "headless",
+      "configurePreset": "headless"
+    },
+    {
+      "name": "full",
+      "configurePreset": "full"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "headless-asan",
+      "configurePreset": "headless-asan"
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz"
+    }
   ],
   "testPresets": [
-    { "name": "headless", "configurePreset": "headless", "output": { "outputOnFailure": true } },
-    { "name": "full", "configurePreset": "full", "output": { "outputOnFailure": true } }
+    {
+      "name": "headless",
+      "configurePreset": "headless",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "full",
+      "configurePreset": "full",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "headless-asan",
+      "configurePreset": "headless-asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
   ]
 }

@@ -19,6 +19,15 @@ struct Model {
     std::vector<std::shared_ptr<Texture>> textures;
 };
 
+// Where asset bytes may come from. The exported runtime must use PackageOnly
+// so the package boundary is a real security boundary; the editor (a trusted
+// developer process) may use EditorFilesystem.
+enum class AssetAccessMode {
+    EditorFilesystem,   // trusted: absolute paths and host-disk fallback allowed
+    ProjectFilesystem,  // relative paths resolved inside project_root only
+    PackageOnly,        // release runtime: pak entries only, never the host FS
+};
+
 // Loads and caches assets from disk or from an in-memory pak (see core/pak.h).
 // All loaders return nullptr on failure and log the reason.
 class AssetManager {
@@ -26,7 +35,9 @@ public:
     AssetManager() = default;
 
     // Raw bytes of any file: pak entry wins when a pak is set and contains
-    // the path, otherwise the file is read from disk.
+    // the path; the disk fallback depends on the access mode (never in
+    // PackageOnly). Non-editor modes reject absolute/traversal paths and,
+    // in ProjectFilesystem, anything resolving outside the project root.
     Result<std::vector<u8>> read_file(const std::string& path);
     Result<std::string> read_text(const std::string& path);
 
@@ -35,6 +46,10 @@ public:
 
     // Optional pak overlay: when set, read_file prefers pak entries.
     void set_pak(class PakReader* pak) { pak_ = pak; }
+
+    void set_access_mode(AssetAccessMode m) { mode_ = m; }
+    AssetAccessMode access_mode() const noexcept { return mode_; }
+    void set_project_root(const std::string& root) { project_root_ = root; }
 
     void clear_cache() { cache_.clear(); }
     u64 cache_size() const { return cache_.size(); }
@@ -48,6 +63,8 @@ private:
 
     std::unordered_map<std::string, std::shared_ptr<void>> cache_;
     class PakReader* pak_ = nullptr;
+    AssetAccessMode mode_ = AssetAccessMode::EditorFilesystem;
+    std::string project_root_;
 };
 
 } // namespace ignis

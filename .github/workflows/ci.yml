@@ -65,9 +65,9 @@ jobs:
         run: |
           ./build/headless/tools/exporter/ignis_export \
             --scene scenes/test_scene.scene.json --include scripts --include assets \
-            --out /tmp/dist
+            --out build/dist
           ./build/headless/runtime/ignis_runtime --headless --frames 60 \
-            --pak /tmp/dist/game.ignispak > /dev/null
+            --pak build/dist/game.ignispak > /dev/null
 
   full:
     name: Full build with editor + Vulkan (compile/link)

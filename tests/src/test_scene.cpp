@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
+#include "ignis/core/json_parse.h"
 #include "ignis/ecs/components.h"
 #include "ignis/scene/scene.h"
 
 #include <filesystem>
+#include <fstream>
 
 using namespace ignis;
 
@@ -186,4 +188,114 @@ TEST(Scene, LoadJsonRejectsMalformed) {
     // A failed load must not clobber the current scene.
     EXPECT_EQ(scene.world().entity_count(), 2u);
     EXPECT_EQ(scene.name(), "demo");
+}
+
+namespace {
+
+nlohmann::json entity_json(u32 id, const std::string& name = "e") {
+    nlohmann::json ej;
+    ej["id"] = id;
+    ej["name"] = name;
+    return ej;
+}
+
+} // namespace
+
+TEST(SceneSecurity, NonObjectJsonRejected) {
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    EXPECT_FALSE(scene.load_json(nlohmann::json::array()).ok());
+    EXPECT_FALSE(scene.load_json(nlohmann::json(42)).ok());
+}
+
+TEST(SceneSecurity, DuplicateEntityIdsRejected) {
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    nlohmann::json j;
+    j["name"] = "dup";
+    j["entities"] = {entity_json(1, "a"), entity_json(1, "b")};
+    EXPECT_FALSE(scene.load_json(j).ok());
+}
+
+TEST(SceneSecurity, MissingOrNonNumericIdRejected) {
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    nlohmann::json j;
+    j["entities"] = nlohmann::json::array();
+    j["entities"].push_back({{"name", "no id"}});
+    EXPECT_FALSE(scene.load_json(j).ok());
+    j["entities"][0] = {{"id", "not-a-number"}, {"name", "x"}};
+    EXPECT_FALSE(scene.load_json(j).ok());
+}
+
+TEST(SceneSecurity, EntityCountLimitEnforced) {
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    nlohmann::json j;
+    j["entities"] = nlohmann::json::array();
+    for (u32 i = 1; i <= 5; ++i) j["entities"].push_back(entity_json(i));
+    SceneLimits limits;
+    limits.max_entities = 2;
+    EXPECT_FALSE(scene.load_json(j, limits).ok());
+    EXPECT_TRUE(scene.load_json(j).ok()); // default limits accept it
+}
+
+TEST(SceneSecurity, ComponentsPerEntityLimitEnforced) {
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    nlohmann::json comps = nlohmann::json::object();
+    comps["Transform"] = nlohmann::json::object();
+    comps["Camera"] = nlohmann::json::object();
+    comps["Light"] = nlohmann::json::object();
+    nlohmann::json ej = entity_json(1);
+    ej["components"] = comps;
+    nlohmann::json j;
+    j["entities"] = nlohmann::json::array({ej}); // explicit array, not an init list
+    ASSERT_TRUE(j["entities"].is_array());
+    ASSERT_EQ(j["entities"][0]["components"].size(), 3u);
+    SceneLimits limits;
+    limits.max_components_per_entity = 2;
+    EXPECT_FALSE(scene.load_json(j, limits).ok());
+}
+
+TEST(SceneSecurity, DeeplyNestedJsonRejected) {
+    const std::string deep = std::string(100000, '[') + std::string(100000, ']');
+    auto parsed = parse_json_bounded(deep);
+    EXPECT_FALSE(parsed.ok()); // bounded depth: parse error, no stack overflow
+    const auto path = std::filesystem::temp_directory_path() / "ignis_deep_scene.json";
+    {
+        std::ofstream f(path);
+        f << "{\"name\":\"x\",\"entities\":" << deep << "}";
+    }
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    EXPECT_FALSE(scene.load_file(path.string()).ok());
+    std::filesystem::remove(path);
+}
+
+TEST(SceneSecurity, OversizedSceneFileRejected) {
+    const auto path = std::filesystem::temp_directory_path() / "ignis_big_scene.json";
+    {
+        std::ofstream f(path);
+        f << "{\"name\":\"" << std::string(1000, 'x') << "\",\"entities\":[]}";
+    }
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    SceneLimits limits;
+    limits.max_file_bytes = 16;
+    EXPECT_FALSE(scene.load_file(path.string(), limits).ok());
+    EXPECT_TRUE(scene.load_file(path.string()).ok()); // default limit accepts
+    std::filesystem::remove(path);
+}
+
+TEST(SceneSecurity, MalformedJsonFileRejected) {
+    const auto path = std::filesystem::temp_directory_path() / "ignis_bad_scene.json";
+    {
+        std::ofstream f(path);
+        f << "{\"name\": \"truncated\"  ";
+    }
+    Scene scene("s");
+    register_builtin_components(scene.world());
+    EXPECT_FALSE(scene.load_file(path.string()).ok());
+    std::filesystem::remove(path);
 }

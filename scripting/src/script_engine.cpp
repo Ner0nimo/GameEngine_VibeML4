@@ -8,6 +8,11 @@
 
 #include "lua_all.h"
 
+#include "ignis/core/path_util.h"
+
+#include <cstdlib>
+#include <filesystem>
+#include <unordered_set>
 #include <vector>
 
 namespace ignis {
@@ -15,8 +20,21 @@ namespace ignis {
 namespace {
 
 // --- lua <-> json conversion ------------------------------------------------
+// Bounded conversion: cyclic tables, deep nesting and huge tables raise a Lua
+// error (caught by the pcall at the script boundary) instead of exhausting the
+// native stack or memory.
 
-nlohmann::json lua_to_json(lua_State* L, int idx) {
+constexpr int kMaxLuaTableDepth = 64;
+constexpr u64 kMaxLuaTableEntries = 100000;
+
+nlohmann::json lua_to_json_impl(lua_State* L, int idx, int depth,
+                                std::unordered_set<const void*>& visited, u64& entries,
+                                bool& error) {
+    if (error) return nullptr;
+    if (depth > kMaxLuaTableDepth || ++entries > kMaxLuaTableEntries) {
+        error = true;
+        return nullptr;
+    }
     idx = lua_absindex(L, idx);
     switch (lua_type(L, idx)) {
         case LUA_TNIL: return nullptr;
@@ -27,6 +45,12 @@ nlohmann::json lua_to_json(lua_State* L, int idx) {
         }
         case LUA_TSTRING: return lua_tostring(L, idx);
         case LUA_TTABLE: {
+            const void* ptr = lua_topointer(L, idx);
+            if (!visited.insert(ptr).second) {
+                error = true;
+                return nullptr;
+            }
+            struct Guard { std::unordered_set<const void*>& v; const void* p; ~Guard() { v.erase(p); } } g{visited, ptr};
             // Array if it has [1] and no other non-integer keys, else object.
             bool is_array = lua_geti(L, idx, 1) != LUA_TNIL;
             lua_pop(L, 1);
@@ -34,23 +58,55 @@ nlohmann::json lua_to_json(lua_State* L, int idx) {
                 nlohmann::json arr = nlohmann::json::array();
                 for (lua_Integer i = 1;; ++i) {
                     if (lua_geti(L, idx, i) == LUA_TNIL) { lua_pop(L, 1); break; }
-                    arr.push_back(lua_to_json(L, -1));
+                    arr.push_back(lua_to_json_impl(L, -1, depth + 1, visited, entries, error));
                     lua_pop(L, 1);
+                    if (error) return nullptr;
                 }
                 return arr;
             }
             nlohmann::json obj = nlohmann::json::object();
             lua_pushnil(L);
-            while (lua_next(L, idx) != 0) {
-                std::string key = lua_tostring(L, -2);
-                if (key.empty()) key = std::to_string(lua_tointeger(L, -2));
-                obj[key] = lua_to_json(L, -1);
+            while (!error && lua_next(L, idx) != 0) {
+                // Key handling: only string keys and integer keys are supported;
+                // anything else (boolean, table, function, float, ...) is a
+                // controlled error. lua_tostring() may return nullptr for
+                // non-string/non-number keys and mutates number keys in place,
+                // so the key type is checked explicitly first.
+                const int kt = lua_type(L, -2);
+                std::string key;
+                if (kt == LUA_TSTRING) {
+                    const char* ks = lua_tostring(L, -2);
+                    key = ks != nullptr ? ks : "";
+                } else if (kt == LUA_TNUMBER && lua_isinteger(L, -2)) {
+                    key = std::to_string(lua_tointeger(L, -2));
+                } else {
+                    error = true;
+                    lua_pop(L, 2); // value + key
+                    break;
+                }
+                obj[key] = lua_to_json_impl(L, -1, depth + 1, visited, entries, error);
                 lua_pop(L, 1);
             }
+            if (error) return nullptr;
             return obj;
         }
         default: return nullptr;
     }
+}
+
+nlohmann::json lua_to_json(lua_State* L, int idx) {
+    bool error = false;
+    nlohmann::json out;
+    {
+        std::unordered_set<const void*> visited;
+        u64 entries = 0;
+        nlohmann::json tmp = lua_to_json_impl(L, idx, 0, visited, entries, error);
+        if (!error) out = std::move(tmp); // on error, keep out empty (no allocation)
+    }
+    // Raise the Lua error only after the C++ locals above are destroyed, so the
+    // longjmp does not skip destructors (keeps LeakSanitizer clean).
+    if (error) luaL_error(L, "lua table is cyclic, too deep or too large");
+    return out;
 }
 
 void push_json(lua_State* L, const nlohmann::json& j) {
@@ -251,8 +307,19 @@ int l_scene_prefabs(lua_State* L) {
 }
 
 int l_scene_save(lua_State* L) {
+    auto* eng = get_engine(L);
     const char* path = luaL_checkstring(L, 1);
-    lua_pushboolean(L, get_scene(L)->save_to_file(path ? path : "").ok() ? 1 : 0);
+    const std::string p = path ? path : "";
+    // Path authorization: same policy as agent commands / asset access mode.
+    // Exported runtime (PackageOnly / host paths disallowed) can never write
+    // to the host filesystem from a packaged script.
+    std::string resolved = p;
+    if (eng && !eng->save_path_allowed(p, resolved)) {
+        IGNIS_WARN("ignis.scene.save denied for path '{}' (path policy)", p);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    lua_pushboolean(L, get_scene(L)->save_to_file(resolved).ok() ? 1 : 0);
     return 1;
 }
 
@@ -306,12 +373,78 @@ ScriptEngine::~ScriptEngine() {
     shutdown();
 }
 
+void ScriptEngine::instruction_hook(lua_State* L, lua_Debug* /*ar*/) {
+    ScriptEngine* eng = get_engine(L);
+    if (!eng) return;
+    eng->instruction_used_ += 1000; // hook fires every 1000 instructions (LUA_MASKCOUNT)
+    if (eng->instruction_used_ > eng->instruction_budget_)
+        luaL_error(L, "script instruction budget exceeded");
+}
+
+int ScriptEngine::readonly_newindex(lua_State* L) {
+    return luaL_error(L, "attempt to modify the read-only shared global table");
+}
+
+void* ScriptEngine::mem_alloc(void* ud, void* ptr, size_t osize, size_t nsize) {
+    auto* eng = static_cast<ScriptEngine*>(ud);
+    if (nsize == 0) { // free
+        if (ptr) {
+            eng->mem_used_ -= osize;
+            std::free(ptr);
+        }
+        return nullptr;
+    }
+    const size_t old = ptr ? osize : 0;
+    // Hard cap: fail the allocation -> Lua raises a controlled
+    // "not enough memory" error instead of exhausting process memory.
+    if (nsize > eng->mem_cap_ || eng->mem_used_ - old + nsize > eng->mem_cap_)
+        return nullptr;
+    void* p = std::realloc(ptr, nsize);
+    if (!p) return nullptr;
+    eng->mem_used_ += nsize - old;
+    return p;
+}
+
+bool ScriptEngine::save_path_allowed(const std::string& path, std::string& resolved) const {
+    // Defense in depth: the asset access mode of a packaged runtime is
+    // PackageOnly - that always denies host writes, whatever the flags say.
+    if (assets_ && assets_->access_mode() == AssetAccessMode::PackageOnly)
+        return false;
+    if (!host_paths_allowed_)
+        return false;
+    if (project_root_.empty()) {
+        resolved = path;
+        return true;
+    }
+    if (is_unsafe_resource_path(path))
+        return false;
+    namespace fs = std::filesystem;
+    const fs::path full = fs::path(project_root_) / path;
+    if (!is_path_within_root(project_root_, full))
+        return false;
+    resolved = full.string();
+    return true;
+}
+
 Result<void> ScriptEngine::init(Scene* scene, AssetManager* assets) {
     scene_ = scene;
     assets_ = assets;
-    L_ = luaL_newstate();
-    if (!L_) return Result<void>::failure("luaL_newstate failed");
-    luaL_openlibs(L_);
+    L_ = lua_newstate(&ScriptEngine::mem_alloc, this); // custom allocator: memory budget
+    if (!L_) return Result<void>::failure("lua_newstate failed");
+    // Sandbox: open only the safe standard libraries. io, os, package, debug,
+    // coroutine and dynamic loading (load/dofile/loadfile) are never exposed,
+    // so scripts only get the explicit ignis.* API plus safe base/string/
+    // table/math/utf8 functionality. Per-entity envs inherit this sandboxed
+    // _G via __index, not the host's.
+    luaL_requiref(L_, "_G", luaopen_base, 1); lua_pop(L_, 1);
+    luaL_requiref(L_, "string", luaopen_string, 1); lua_pop(L_, 1);
+    luaL_requiref(L_, "table", luaopen_table, 1); lua_pop(L_, 1);
+    luaL_requiref(L_, "math", luaopen_math, 1); lua_pop(L_, 1);
+    luaL_requiref(L_, "utf8", luaopen_utf8, 1); lua_pop(L_, 1);
+    for (const char* fn : {"load", "dofile", "loadfile"}) {
+        lua_pushnil(L_);
+        lua_setglobal(L_, fn);
+    }
     register_bindings(L_);
 
     lua_pushlightuserdata(L_, scene);
@@ -320,6 +453,15 @@ Result<void> ScriptEngine::init(Scene* scene, AssetManager* assets) {
     lua_setfield(L_, LUA_REGISTRYINDEX, "ignis.assets");
     lua_pushlightuserdata(L_, this);
     lua_setfield(L_, LUA_REGISTRYINDEX, "ignis.engine");
+    // Make the shared globals table read-only for scripts: per-script envs
+    // inherit it via __index, so without this one script could mutate shared
+    // state through _G and affect every other script. Set after
+    // register_bindings because lua_setfield on globals would hit __newindex.
+    lua_newtable(L_);
+    lua_pushcfunction(L_, &ScriptEngine::readonly_newindex);
+    lua_setfield(L_, -2, "__newindex");
+    lua_setmetatable(L_, LUA_RIDX_GLOBALS); // Lua 5.4: globals live at this registry index
+    lua_sethook(L_, &ScriptEngine::instruction_hook, LUA_MASKCOUNT, 1000);
     return Result<void>::success();
 }
 
@@ -368,8 +510,10 @@ Result<void> ScriptEngine::ensure_env(EntityId e) {
     lua_setmetatable(L_, -2);
 
     // Run the chunk with env as _ENV so its functions land in env.
-    lua_rawgeti(L_, LUA_REGISTRYINDEX, chunk_ref);
-    lua_setupvalue(L_, -2, 1); // set _ENV of the chunk to env
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, chunk_ref); // [env, chunk]
+    lua_pushvalue(L_, -2);                           // [env, chunk, env]
+    lua_setupvalue(L_, -2, 1);                       // chunk._ENV = env -> [env, chunk]
+    instruction_used_ = 0;
     if (lua_pcall(L_, 0, 0, 0) != LUA_OK) {
         std::string err = lua_tostring(L_, -1) ? lua_tostring(L_, -1) : "runtime error";
         lua_pop(L_, 1);
@@ -392,6 +536,7 @@ void ScriptEngine::run_callback(int env_ref, const char* name, bool pass_dt, f32
     }
     lua_pushvalue(L_, -2); // self = env
     if (pass_dt) lua_pushnumber(L_, static_cast<lua_Number>(dt));
+    instruction_used_ = 0; // budget is per script callback, not per frame
     if (lua_pcall(L_, pass_dt ? 2 : 1, 0, 0) != LUA_OK) {
         IGNIS_ERROR("script {}: {}", name, lua_tostring(L_, -1));
         lua_pop(L_, 1);
@@ -399,9 +544,21 @@ void ScriptEngine::run_callback(int env_ref, const char* name, bool pass_dt, f32
     lua_pop(L_, 1); // env
 }
 
+bool ScriptEngine::script_env_bool(EntityId e, const char* name) const {
+    if (!L_) return false;
+    const auto it = env_refs_.find(e);
+    if (it == env_refs_.end()) return false;
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, it->second); // env
+    lua_getfield(L_, -1, name);
+    const bool v = lua_toboolean(L_, -1) != 0;
+    lua_pop(L_, 2);
+    return v;
+}
+
 void ScriptEngine::update(f32 dt) {
     ++frame_;
     dt_ = dt;
+    instruction_used_ = 0;
     if (!L_ || !scene_) return;
     World& world = scene_->world();
 

@@ -1,0 +1,141 @@
+name: Security CI
+
+# Security regression gates from the red-team review (issue #33):
+# sanitizer test runs, bounded fuzz smoke tests, static analysis and a
+# dependency-pinning audit. PRs get short runs; the nightly schedule runs a
+# longer fuzzing campaign.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.cpp'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/CMakeLists.txt'
+      - '**/*.cmake'
+      - 'CMakePresets.json'
+      - 'cmake/**'
+      - 'tests/**'
+      - 'scenes/**'
+      - 'scripts/**'
+      - '.github/workflows/security.yml'
+      - '.clang-tidy'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.cpp'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/CMakeLists.txt'
+      - '**/*.cmake'
+      - 'CMakePresets.json'
+      - 'cmake/**'
+      - 'tests/**'
+      - 'scenes/**'
+      - 'scripts/**'
+      - '.github/workflows/security.yml'
+      - '.clang-tidy'
+  workflow_dispatch:
+  schedule:
+    # Nightly longer fuzzing campaign at 03:00 UTC.
+    - cron: '0 3 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 30s on PRs/pushes, 300s on the nightly schedule.
+  FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '300' || '30' }}
+
+jobs:
+  sanitizer-tests:
+    name: ASan+UBSan headless build + tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build cmake git clang
+      - name: Configure (ASan+UBSan)
+        run: cmake --preset headless-asan
+      - name: Build
+        run: cmake --build --preset headless-asan -j
+      - name: Test under sanitizers
+        run: ctest --preset headless-asan --output-on-failure
+
+  fuzz:
+    name: Fuzz smoke (pak + scene)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build cmake git clang
+      - name: Configure fuzz targets
+        run: cmake --preset fuzz
+      - name: Build fuzz targets
+        run: cmake --build --preset fuzz -j --target fuzz_pak fuzz_scene
+      - name: Fuzz pak parser
+        run: |
+          mkdir -p /tmp/fuzz-artifacts
+          ./build/fuzz/tests/fuzz/fuzz_pak \
+            -max_total_time=${{ env.FUZZ_SECONDS }} -max_len=4194304 -rss_limit_mb=2560 \
+            -artifact_prefix=/tmp/fuzz-artifacts/ \
+            tests/fuzz/corpus/pak
+      - name: Fuzz scene parser
+        run: |
+          ./build/fuzz/tests/fuzz/fuzz_scene \
+            -max_total_time=${{ env.FUZZ_SECONDS }} -max_len=1048576 -rss_limit_mb=2560 \
+            -artifact_prefix=/tmp/fuzz-artifacts/ \
+            tests/fuzz/corpus/scene
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-artifacts
+          path: /tmp/fuzz-artifacts/
+          retention-days: 30
+
+  clang-tidy:
+    name: clang-tidy static analysis (security checks)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build cmake git clang-tidy
+      - name: Configure with compile commands
+        run: |
+          cmake -G Ninja -B build/tidy -S . \
+            -DCMAKE_BUILD_TYPE=Debug -DIGNIS_WITH_GRAPHICS=OFF \
+            -DIGNIS_BUILD_EDITOR=OFF -DIGNIS_BUILD_TESTS=ON -DIGNIS_BUILD_EXPORTER=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Run clang-tidy on Ignis sources
+        run: |
+          run-clang-tidy -p build/tidy \
+            -clang-tidy-binary clang-tidy \
+            -header-filter '^(engine|scripting|physics|audio|runtime|window|renderer|editor|tools|tests)/.*' \
+            engine/src scripting/src physics/src audio/src runtime/src tools/exporter/src
+
+  dep-pin-audit:
+    name: FetchContent pinning audit (cmake/Dependencies.cmake)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # AGENTS.md: deps are pinned via FetchContent GIT_TAG, never branches.
+      - name: Verify every FetchContent dependency is pinned to a GIT_TAG (tag/commit, never a branch)
+        run: |
+          python3 - <<'EOF'
+          import re, sys
+          text = open('cmake/Dependencies.cmake').read()
+          blocks = re.findall(r'FetchContent_Declare\(\s*(\w+)(.*?)\)', text, re.S)
+          unpinned = [name for name, body in blocks if 'GIT_TAG' not in body]
+          if unpinned:
+              print('UNPINNED DEPENDENCIES (need GIT_TAG):', ', '.join(unpinned))
+              sys.exit(1)
+          print(f'all {len(blocks)} FetchContent dependencies are pinned')
+          EOF

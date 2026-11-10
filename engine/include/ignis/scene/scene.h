@@ -17,6 +17,17 @@ namespace ignis {
 // A system is any callable that advances the world, e.g. scripting, physics.
 using System = std::function<void(World&, f32 dt)>;
 
+// Resource budgets enforced while loading untrusted scene JSON. Starting
+// points, not universal requirements.
+struct SceneLimits {
+    u32 max_entities = 100000;
+    u32 max_components_per_entity = 64;
+    u32 max_prefabs = 10000;
+    u32 max_json_depth = 64;
+    u64 max_file_bytes = 64ull << 20;   // 64 MiB serialized scene
+    u64 max_string_bytes = 1ull << 20;  // 1 MiB per string field
+};
+
 // A scene owns a world, named prefabs and the system pipeline.
 // Scene files are JSON (see scenes/test_scene.scene.json).
 class Scene {
@@ -50,18 +61,20 @@ public:
 
     // --- serialization ----------------------------------------------------
     nlohmann::json serialize() const;
-    static Scene deserialize(const nlohmann::json& j);
+    // Throws std::runtime_error when the JSON violates the given limits or is
+    // structurally malformed; callers at input boundaries must catch.
+    static Scene deserialize(const nlohmann::json& j, const SceneLimits& limits = {});
     Result<void> save_to_file(const std::string& path) const;
-    static Result<Scene> load_from_file(const std::string& path);
+    static Result<Scene> load_from_file(const std::string& path, const SceneLimits& limits = {});
     // Load a scene file INTO this scene: replaces this scene's world contents,
     // prefabs and name, but keeps systems added via add_system. Components
     // must be registered beforehand (e.g. register_builtin_components +
     // physics/audio), since the registry is process-global.
-    Result<void> load_file(const std::string& path);
+    Result<void> load_file(const std::string& path, const SceneLimits& limits = {});
     // Same contract as load_file, but for already-parsed JSON (used by the
     // editor to restore an in-memory snapshot without touching the file).
     // Fails if the JSON is structurally malformed (not a scene object).
-    Result<void> load_json(const nlohmann::json& j);
+    Result<void> load_json(const nlohmann::json& j, const SceneLimits& limits = {});
 
 private:
     World world_;

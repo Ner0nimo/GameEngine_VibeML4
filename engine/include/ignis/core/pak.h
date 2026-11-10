@@ -5,6 +5,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ignis {
@@ -19,20 +20,31 @@ namespace ignis {
 //
 // All multi-byte integers are little-endian.
 
+// Policy limits enforced by PakReader::open when validating an untrusted
+// package index. Values are starting points, not universal requirements.
+struct PakLimits {
+    u64 max_index_bytes = 16ull << 20;    // 16 MiB
+    u64 max_entry_bytes = 256ull << 20;   // 256 MiB per asset
+    u64 max_total_bytes = 2ull << 30;      // 2 GiB total unpacked
+    u64 max_entries = 100000;
+    u64 max_path_bytes = 1024;
+};
+
 class PakWriter {
 public:
-    void add_file(const std::string& pak_path, const std::vector<u8>& data);
+    Result<void> add_file(const std::string& pak_path, const std::vector<u8>& data);
     Result<void> add_file_from_disk(const std::string& pak_path, const std::string& disk_path);
     Result<void> write(const std::string& out_path) const;
 
 private:
     struct Entry { std::string pak_path; std::vector<u8> data; };
     std::vector<Entry> entries_;
+    std::unordered_set<std::string> paths_;
 };
 
 class PakReader {
 public:
-    Result<void> open(const std::string& path);
+    Result<void> open(const std::string& path, const PakLimits& limits = {});
     bool is_open() const { return is_open_; }
     bool has(const std::string& pak_path) const;
     Result<std::vector<u8>> read(const std::string& pak_path) const;

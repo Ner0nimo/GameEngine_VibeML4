@@ -25,8 +25,12 @@
 #include "ignis/window/window.h"
 #endif
 
+#include "ignis/core/json_parse.h"
+
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -61,8 +65,20 @@ bool parse_args(int argc, char** argv, Args& out) {
             return argv[++i];
         };
         if (a == "--headless") out.headless = true;
-        else if (a == "--frames") out.frames = std::stoi(next("--frames"));
-        else if (a == "--dt") out.dt = std::stof(next("--dt"));
+        else if (a == "--frames") {
+            try { out.frames = std::stoi(next("--frames")); }
+            catch (const std::exception&) {
+                std::fprintf(stderr, "invalid --frames value (not an integer)\n");
+                return false;
+            }
+        }
+        else if (a == "--dt") {
+            try { out.dt = std::stof(next("--dt")); }
+            catch (const std::exception&) {
+                std::fprintf(stderr, "invalid --dt value (not a number)\n");
+                return false;
+            }
+        }
         else if (a == "--pak") out.pak_path = next("--pak");
         else if (a == "--commands") out.commands_path = next("--commands");
         else if (a == "--dump") out.dump_path = next("--dump");
@@ -71,6 +87,17 @@ bool parse_args(int argc, char** argv, Args& out) {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
             return false;
         }
+    }
+    // Never trust externally supplied simulation parameters.
+    constexpr int kMaxFrames = 10000000;
+    constexpr f32 kMaxDt = 10.f;
+    if (out.frames < 1 || out.frames > kMaxFrames) {
+        std::fprintf(stderr, "--frames must be in [1, %d]\n", kMaxFrames);
+        return false;
+    }
+    if (!std::isfinite(out.dt) || out.dt <= 0.f || out.dt > kMaxDt) {
+        std::fprintf(stderr, "--dt must be finite and in (0, %f]\n", static_cast<double>(kMaxDt));
+        return false;
     }
     // Scene path may be omitted when loading from a pak (scene.json inside).
     return !out.scene_path.empty() || !out.pak_path.empty();
@@ -99,6 +126,12 @@ int main(int argc, char** argv) {
             return 1;
         }
         assets.set_pak(&pak);
+        // Exported game: the package is the only asset source, never the host FS.
+        assets.set_access_mode(AssetAccessMode::PackageOnly);
+    } else {
+        // Development runtime: assets resolve inside the project (CWD) only.
+        assets.set_access_mode(AssetAccessMode::ProjectFilesystem);
+        assets.set_project_root(std::filesystem::current_path().string());
     }
 
     // --- scene --------------------------------------------------------------
@@ -115,7 +148,17 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::string text(bytes.value().begin(), bytes.value().end());
-        scene = Scene::deserialize(nlohmann::json::parse(text));
+        auto parsed = parse_json_bounded(text);
+        if (!parsed.ok()) {
+            IGNIS_ERROR("cannot parse scene.json in pak: {}", parsed.error());
+            return 1;
+        }
+        try {
+            scene = Scene::deserialize(parsed.value());
+        } catch (const std::exception& e) {
+            IGNIS_ERROR("malformed scene.json in pak: {}", e.what());
+            return 1;
+        }
     } else {
         auto loaded = scene.load_file(args.scene_path);
         if (!loaded.ok()) {
@@ -129,6 +172,13 @@ int main(int argc, char** argv) {
     if (auto r = scripts.init(&scene, &assets); !r.ok()) {
         IGNIS_ERROR("script engine init failed: {}", r.error());
         return 1;
+    }
+    // Lua path bindings (ignis.scene.save) follow the same policy as assets:
+    // packaged runtime -> no host paths; dev runtime -> project root only.
+    if (!args.pak_path.empty()) {
+        scripts.set_host_paths_allowed(false);
+    } else {
+        scripts.set_project_root(std::filesystem::current_path().string());
     }
     AudioEngine audio;
     if (auto r = audio.init(args.headless); !r.ok()) { // null device when headless
@@ -165,6 +215,11 @@ int main(int argc, char** argv) {
     // --- agent commands (AI-controllable) ------------------------------------
     if (!args.commands_path.empty()) {
         CommandProcessor proc(scene, assets);
+        if (!args.pak_path.empty()) {
+            proc.set_host_paths_allowed(false); // exported game: no host paths
+        } else {
+            proc.set_project_root(std::filesystem::current_path().string());
+        }
         auto results = proc.execute_file(args.commands_path);
         for (const auto& r : results) {
             IGNIS_INFO("cmd: {} ({})", r.message, r.ok ? "ok" : "FAIL");
