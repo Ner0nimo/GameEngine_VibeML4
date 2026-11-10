@@ -15,6 +15,7 @@ Thumbs.db
 
 # Local artifacts
 *.ignispak
+!tests/fuzz/corpus/pak/*.ignispak
 .dist/
 logs/
 imgui.ini

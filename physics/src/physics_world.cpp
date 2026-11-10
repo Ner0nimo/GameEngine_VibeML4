@@ -285,14 +285,14 @@ int l_physics_raycast(lua_State* L) {
     lua_pushinteger(L, static_cast<lua_Integer>(hit.entity)); lua_setfield(L, -2, "entity");
     lua_pushnumber(L, static_cast<lua_Number>(hit.distance)); lua_setfield(L, -2, "distance");
     lua_createtable(L, 3, 0);
-    lua_pushnumber(L, hit.point.x); lua_rawseti(L, -2, 1);
-    lua_pushnumber(L, hit.point.y); lua_rawseti(L, -2, 2);
-    lua_pushnumber(L, hit.point.z); lua_rawseti(L, -2, 3);
+    lua_pushnumber(L, static_cast<lua_Number>(hit.point.x)); lua_rawseti(L, -2, 1);
+    lua_pushnumber(L, static_cast<lua_Number>(hit.point.y)); lua_rawseti(L, -2, 2);
+    lua_pushnumber(L, static_cast<lua_Number>(hit.point.z)); lua_rawseti(L, -2, 3);
     lua_setfield(L, -2, "point");
     lua_createtable(L, 3, 0);
-    lua_pushnumber(L, hit.normal.x); lua_rawseti(L, -2, 1);
-    lua_pushnumber(L, hit.normal.y); lua_rawseti(L, -2, 2);
-    lua_pushnumber(L, hit.normal.z); lua_rawseti(L, -2, 3);
+    lua_pushnumber(L, static_cast<lua_Number>(hit.normal.x)); lua_rawseti(L, -2, 1);
+    lua_pushnumber(L, static_cast<lua_Number>(hit.normal.y)); lua_rawseti(L, -2, 2);
+    lua_pushnumber(L, static_cast<lua_Number>(hit.normal.z)); lua_rawseti(L, -2, 3);
     lua_setfield(L, -2, "normal");
     return 1;
 }
