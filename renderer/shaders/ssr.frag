@@ -80,7 +80,8 @@ void main() {
         if (!project(p, uv)) break;
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break; // off-screen
         float diff = rayDiff(p, uv);
-        if (prevDiff > 0.0 && diff <= 0.0) {
+        // i > 0: the first sample sits on the source surface itself (self-crossing).
+        if (i > 0 && prevDiff > 0.0 && diff <= 0.0) {
             float lo = prevT, hi = tt;
             vec2 huv = uv;
             for (int r = 0; r < 6; ++r) {
@@ -90,8 +91,8 @@ void main() {
                 if (!project(pm, muv)) break;
                 if (rayDiff(pm, muv) > 0.0) lo = mid; else { hi = mid; huv = muv; }
             }
-            if (rayDiff(viewPos + Rv * hi, huv) > -THICKNESS) { hitT = hi; hitUV = huv; }
-            break;
+            if (rayDiff(viewPos + Rv * hi, huv) > -THICKNESS) { hitT = hi; hitUV = huv; break; }
+            // Rejected (surface too far behind the ray): keep marching.
         }
         prevT = tt;
         prevDiff = diff;
