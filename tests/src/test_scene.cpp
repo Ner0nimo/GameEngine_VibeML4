@@ -243,12 +243,16 @@ TEST(SceneSecurity, EntityCountLimitEnforced) {
 TEST(SceneSecurity, ComponentsPerEntityLimitEnforced) {
     Scene scene("s");
     register_builtin_components(scene.world());
-    nlohmann::json j;
+    nlohmann::json comps = nlohmann::json::object();
+    comps["Transform"] = nlohmann::json::object();
+    comps["Camera"] = nlohmann::json::object();
+    comps["Light"] = nlohmann::json::object();
     nlohmann::json ej = entity_json(1);
-    ej["components"]["Transform"] = nlohmann::json::object();
-    ej["components"]["Camera"] = nlohmann::json::object();
-    ej["components"]["Light"] = nlohmann::json::object();
-    j["entities"] = {ej};
+    ej["components"] = comps;
+    nlohmann::json j;
+    j["entities"] = nlohmann::json::array({ej}); // explicit array, not an init list
+    ASSERT_TRUE(j["entities"].is_array());
+    ASSERT_EQ(j["entities"][0]["components"].size(), 3u);
     SceneLimits limits;
     limits.max_components_per_entity = 2;
     EXPECT_FALSE(scene.load_json(j, limits).ok());
