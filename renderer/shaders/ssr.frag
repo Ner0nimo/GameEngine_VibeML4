@@ -54,14 +54,6 @@ void main() {
     vec3 Rv = reflect(normalize(viewPos), Nv); // mirror dir in view space
     if (Rv.z >= -0.02) { rt_ssr = vec4(0.0); return; } // grazing / toward camera
 
-    // DEBUG: encode viewPos.z, sceneZ at v_uv, Rv.z into rgb
-    {
-        float sz = sceneViewZ(v_uv, depth);
-        rt_ssr = vec4(clamp(viewPos.z * 0.05 + 0.5, 0.0, 1.0),
-                      clamp(sz * 0.05 + 0.5, 0.0, 1.0),
-                      clamp(Rv.z + 0.5, 0.0, 1.0), 1.0);
-        return;
-    }
     vec3 V = normalize(ubo.camPos.xyz - worldPos);
     float NdotV = clamp(dot(N, V), 0.0, 1.0);
     // Start offset grows at grazing angles so the ray doesn't immediately
@@ -79,7 +71,6 @@ void main() {
     // changing the crossing/refine/blend logic.)
     float prevT = t0;
     float prevDiff = 1e9;
-    float maxDiff = -1e9; // DEBUG
     float hitT = -1.0;
     vec2 hitUV = vec2(0.0);
     for (int i = 0; i < STEPS; ++i) {
@@ -89,7 +80,6 @@ void main() {
         if (!project(p, uv)) break;
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break; // off-screen
         float diff = rayDiff(p, uv);
-        maxDiff = max(maxDiff, diff); // DEBUG
         // i > 0: the first sample sits on the source surface itself (self-crossing).
         if (i > 0 && prevDiff > 0.0 && diff <= 0.0) {
             float lo = prevT, hi = tt;
@@ -107,7 +97,10 @@ void main() {
         prevT = tt;
         prevDiff = diff;
     }
-    if (hitT < 0.0) { rt_ssr = vec4(0.0, 0.0, 0.0, clamp(maxDiff * 0.5, 0.0, 1.0)); return; } // DEBUG: no hit, encode maxDiff
+    if (hitT < 0.0) {
+        rt_ssr = vec4(viewPos.z < -2.0 ? 1.0 : 0.0, 1.0, 0.0, 1.0); // DEBUG: no hit (R=viewPos sane, G=always)
+        return;
+    }
 
     // Confidence: screen-edge fade, ray-length fade, grazing-angle fade.
     float edge = smoothstep(0.0, 0.05, min(min(hitUV.x, 1.0 - hitUV.x), min(hitUV.y, 1.0 - hitUV.y)));
@@ -115,5 +108,5 @@ void main() {
     float confidence = edge * rayFade * NdotV;
 
     vec3 refl = texture(sampler2D(tex_hdr_prev, samp_hdr_prev), hitUV).rgb;
-    rt_ssr = vec4(refl, confidence);
+    rt_ssr = vec4(1.0, 1.0, 1.0, 1.0); // DEBUG: hit
 }
