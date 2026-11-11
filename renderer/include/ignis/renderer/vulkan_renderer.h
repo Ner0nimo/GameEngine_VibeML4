@@ -92,6 +92,14 @@ public:
     // and applied when the renderer is initialized.
     void set_bloom(bool enabled, f32 strength = 0.6f, f32 threshold = 1.0f, f32 knee = 0.5f);
 
+    // Screen-space reflections: enable/disable and tune strength, max
+    // roughness (surfaces rougher than this skip SSR) and max ray distance.
+    // Reflections are traced pre-lighting against the G-buffer depth, sample
+    // the previous frame's lit HDR, and replace the IBL specular by hit
+    // confidence in the lighting pass. Defaults: on, strength 1.0,
+    // maxRoughness 0.85, maxDist 40. Safe to call before init().
+    void set_ssr(bool enabled, f32 strength = 1.0f, f32 maxRoughness = 0.85f, f32 maxDist = 40.f);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -110,6 +118,10 @@ private:
     f32 bloom_strength_ = 0.6f;
     f32 bloom_threshold_ = 1.0f;
     f32 bloom_knee_ = 0.5f;
+    bool ssr_enabled_ = true;
+    f32 ssr_strength_ = 1.0f;
+    f32 ssr_max_roughness_ = 0.85f;
+    f32 ssr_max_dist_ = 40.f;
 };
 
 } // namespace ignis

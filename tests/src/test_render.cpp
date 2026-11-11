@@ -379,6 +379,62 @@ TEST(Render, BloomAddsHalo) {
     EXPECT_GT(ringOn, ringOff + 2u) << "bloom must brighten the ring around the cube";
 }
 
+// SSR must add the cube's reflected light to the ground (lower half of the
+// frame) compared to SSR off (IBL-only reflections).
+TEST(Render, SSRReflectsScene) {
+    if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
+    auto render = [](bool ssr) {
+        Scene scene("ssr");
+        register_builtin_components(scene.world());
+        EntityId ground = scene.world().create_entity("ground");
+        auto& gt = scene.world().emplace<TransformComponent>(ground);
+        gt.position = {0.f, -1.f, 0.f};
+        gt.scale = {40.f, 1.f, 40.f};
+        scene.world().emplace<MeshRendererComponent>(ground).model_path = "assets/cube.gltf";
+        // A big wall filling the upper frame: ground reflection rays are
+        // guaranteed to hit it, so SSR must produce confident hits.
+        EntityId wall = scene.world().create_entity("wall");
+        auto& ct = scene.world().emplace<TransformComponent>(wall);
+        ct.position = {0.f, 4.5f, -4.f};
+        ct.scale = {60.f, 11.f, 1.f}; // fills the upper frame
+        scene.world().emplace<MeshRendererComponent>(wall).model_path = "assets/cube.gltf";
+        EntityId sun = scene.world().create_entity("sun");
+        auto& dl = scene.world().emplace<DirectionalLightComponent>(sun);
+        dl.direction = {0.f, -1.f, -0.5f};
+        dl.intensity = 3.f;
+        Camera camera;
+        camera.position = {0.f, 0.5f, 3.f}; // level: ground lower third, wall above
+        camera.fov_y_deg = 60.f;
+        VulkanRenderer renderer;
+        if (!renderer.init_offscreen(64, 64).ok()) return std::vector<u8>{};
+        renderer.set_ssr(ssr, 2.0f);
+        // Two frames: SSR samples the previous frame's lit HDR.
+        renderer.render(scene, camera, 1.f / 60.f);
+        renderer.render(scene, camera, 1.f / 60.f);
+        auto rb = renderer.readback();
+        renderer.shutdown();
+        return rb.ok() ? std::move(rb.value()) : std::vector<u8>{};
+    };
+    const std::vector<u8> on = render(true);
+    const std::vector<u8> off = render(false);
+    ASSERT_EQ(on.size(), 64u * 64u * 4u);
+    ASSERT_EQ(off.size(), on.size());
+    auto total = [](const std::vector<u8>& px) {
+        u64 sum = 0;
+        for (size_t i = 0; i + 2 < px.size(); i += 4)
+            sum += static_cast<u64>(px[i]) + static_cast<u64>(px[i + 1]) + static_cast<u64>(px[i + 2]);
+        return sum;
+    };
+    const u64 withSSR = total(on);
+    const u64 without = total(off);
+    std::fprintf(stderr, "ssr: total with=%llu without=%llu\n",
+                 static_cast<unsigned long long>(withSSR), static_cast<unsigned long long>(without));
+    // Compare the whole frame: the readback is y-flipped (Vulkan viewport), so
+    // don't assume which half holds the reflective ground.
+    const i64 diff = static_cast<i64>(withSSR) - static_cast<i64>(without);
+    EXPECT_GT(std::abs(diff), 300) << "SSR must change the frame via wall/ground reflections";
+}
+
 TEST(Render, DebugLinesDrawn) {
     if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
     Scene scene("lines");
