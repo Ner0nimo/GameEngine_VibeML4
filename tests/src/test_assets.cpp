@@ -71,8 +71,9 @@ TEST(Assets, GltfTriangle) {
         f << make_gltf_triangle();
     }
     AssetManager am;
-    auto model = am.load_model(path.string());
-    ASSERT_NE(model, nullptr);
+    auto model_r = am.load_model(path.string());
+    ASSERT_TRUE(model_r.ok()) << model_r.error();
+    const auto& model = model_r.value();
     ASSERT_EQ(model->mesh->primitives.size(), 1u);
     const auto& prim = model->mesh->primitives[0];
     EXPECT_EQ(prim.positions.size(), 3u);
@@ -83,7 +84,9 @@ TEST(Assets, GltfTriangle) {
     EXPECT_NEAR(model->materials[0].base_color.g, 0.5f, 1e-6f);
     EXPECT_NEAR(model->materials[0].metallic, 0.2f, 1e-6f);
     // Cached on second load.
-    EXPECT_EQ(am.load_model(path.string()).get(), model.get());
+    auto again = am.load_model(path.string());
+    ASSERT_TRUE(again.ok()) << again.error();
+    EXPECT_EQ(again.value().get(), model.get());
     std::filesystem::remove(path);
 }
 
@@ -95,8 +98,9 @@ TEST(Assets, HdrTexture) {
         f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     }
     AssetManager am;
-    auto tex = am.load_texture(path.string());
-    ASSERT_NE(tex, nullptr);
+    auto tex_r = am.load_texture(path.string());
+    ASSERT_TRUE(tex_r.ok()) << tex_r.error();
+    const auto& tex = tex_r.value();
     EXPECT_TRUE(tex->hdr);
     EXPECT_EQ(tex->width, 4);
     EXPECT_EQ(tex->height, 4);
@@ -106,10 +110,15 @@ TEST(Assets, HdrTexture) {
     std::filesystem::remove(path);
 }
 
-TEST(Assets, MissingFileReturnsNull) {
+TEST(Assets, MissingFileReturnsErrorWithReason) {
     AssetManager am;
-    EXPECT_EQ(am.load_model("/nonexistent/model.gltf"), nullptr);
-    EXPECT_EQ(am.load_texture("/nonexistent/tex.png"), nullptr);
+    auto model_r = am.load_model("/nonexistent/model.gltf");
+    ASSERT_FALSE(model_r.ok());
+    EXPECT_FALSE(model_r.error().empty()); // honest failure: the reason travels with it
+    auto tex_r = am.load_texture("/nonexistent/tex.png");
+    ASSERT_FALSE(tex_r.ok());
+    EXPECT_FALSE(tex_r.error().empty());
+    EXPECT_EQ(am.cache_size(), 0u); // failures must not be cached
 }
 
 namespace {
@@ -224,7 +233,7 @@ TEST(AssetsSecurity, HugeDimensionImageRejectedBeforeAllocation) {
         f.write(reinterpret_cast<const char*>(png.data()), static_cast<std::streamsize>(png.size()));
     }
     AssetManager am;
-    EXPECT_EQ(am.load_texture(path.string()), nullptr);
+    EXPECT_FALSE(am.load_texture(path.string()).ok());
     std::filesystem::remove(path);
 }
 
@@ -298,37 +307,39 @@ std::string gltf_external_buffer(const std::string& uri) {
 
 } // namespace
 
-TEST(AssetsMalformed, GltfTruncatedJsonReturnsNull) {
+TEST(AssetsMalformed, GltfTruncatedJsonReturnsError) {
     const auto p = write_tmp_text("ignis_bad_truncated.gltf", "{\"asset\":{\"version\":\"2.0\"}");
     AssetManager am;
-    EXPECT_EQ(am.load_model(p.string()), nullptr);
+    auto r = am.load_model(p.string());
+    ASSERT_FALSE(r.ok());
+    EXPECT_FALSE(r.error().empty());
     EXPECT_EQ(am.cache_size(), 0u); // failures must not be cached
     fs::remove(p);
 }
 
-TEST(AssetsMalformed, GltfBufferViewOutOfBoundsReturnsNullWithoutCrash) {
+TEST(AssetsMalformed, GltfBufferViewOutOfBoundsReturnsErrorWithoutCrash) {
     // bufferView claims 12000 bytes, buffer holds 42, accessor reads 1000 vec3:
     // must be rejected by validation before any accessor unpack read.
     const auto p = write_tmp_text("ignis_bad_oob.gltf", gltf_with_data_buffer(42, 12000, 1000));
     AssetManager am;
-    EXPECT_NO_THROW(EXPECT_EQ(am.load_model(p.string()), nullptr));
+    EXPECT_NO_THROW(EXPECT_FALSE(am.load_model(p.string()).ok()));
     EXPECT_EQ(am.cache_size(), 0u);
     fs::remove(p);
 }
 
-TEST(AssetsMalformed, GltfUnloadedBufferReturnsNullWithoutThrow) {
+TEST(AssetsMalformed, GltfUnloadedBufferReturnsErrorWithoutThrow) {
     // Buffer with neither uri nor data: unpack yields nothing; the loader must
-    // turn that into a controlled nullptr, never an escaping exception.
+    // turn that into a controlled error Result, never an escaping exception.
     const auto p = write_tmp_text("ignis_bad_nobuf.gltf", gltf_no_uri_buffer());
     AssetManager am;
-    EXPECT_NO_THROW(EXPECT_EQ(am.load_model(p.string()), nullptr));
+    EXPECT_NO_THROW(EXPECT_FALSE(am.load_model(p.string()).ok()));
     fs::remove(p);
 }
 
-TEST(AssetsMalformed, GltfMissingExternalBufferReturnsNull) {
+TEST(AssetsMalformed, GltfMissingExternalBufferReturnsError) {
     const auto p = write_tmp_text("ignis_bad_missing_bin.gltf", gltf_external_buffer("missing.bin"));
     AssetManager am; // EditorFilesystem: external URIs allowed, file absent
-    EXPECT_EQ(am.load_model(p.string()), nullptr);
+    EXPECT_FALSE(am.load_model(p.string()).ok());
     fs::remove(p);
 }
 
@@ -338,8 +349,9 @@ TEST(AssetsMalformed, ExternalBufferWorksInEditorMode) {
     const auto bin = write_tmp_bytes("ignis_ext.bin", std::vector<u8>(42, 0));
     const auto p = write_tmp_text("ignis_ext.gltf", gltf_external_buffer("ignis_ext.bin"));
     AssetManager am; // EditorFilesystem (default)
-    auto model = am.load_model(p.string());
-    ASSERT_NE(model, nullptr);
+    auto model_r = am.load_model(p.string());
+    ASSERT_TRUE(model_r.ok()) << model_r.error();
+    const auto& model = model_r.value();
     ASSERT_EQ(model->mesh->primitives.size(), 1u);
     EXPECT_EQ(model->mesh->primitives[0].positions.size(), 3u);
     fs::remove(p);
@@ -361,7 +373,7 @@ TEST(AssetsMalformed, PackageOnlyRejectsExternalBufferTraversal) {
     AssetManager am;
     am.set_pak(&reader);
     am.set_access_mode(AssetAccessMode::PackageOnly);
-    EXPECT_EQ(am.load_model("assets/m.gltf"), nullptr);
+    EXPECT_FALSE(am.load_model("assets/m.gltf").ok());
     fs::remove(pak_path);
     fs::remove(bin);
 }
@@ -378,22 +390,23 @@ TEST(AssetsMalformed, PackageOnlyLoadsDataUriModelFromPak) {
     AssetManager am;
     am.set_pak(&reader);
     am.set_access_mode(AssetAccessMode::PackageOnly);
-    auto model = am.load_model("assets/m.gltf");
-    ASSERT_NE(model, nullptr);
+    auto model_r = am.load_model("assets/m.gltf");
+    ASSERT_TRUE(model_r.ok()) << model_r.error();
+    const auto& model = model_r.value();
     ASSERT_EQ(model->mesh->primitives.size(), 1u);
     EXPECT_EQ(model->mesh->primitives[0].positions.size(), 3u);
     fs::remove(pak_path);
 }
 
-TEST(AssetsMalformed, CorruptTexturesReturnNull) {
+TEST(AssetsMalformed, CorruptTexturesReturnError) {
     std::vector<u8> garbage(512, 0xAB);
     const auto p1 = write_tmp_bytes("ignis_garbage.png", garbage);
     const auto p2 = write_tmp_bytes("ignis_empty.png", {});
     const auto p3 = write_tmp_bytes("ignis_trunc.png", {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A});
     AssetManager am;
-    EXPECT_EQ(am.load_texture(p1.string()), nullptr);
-    EXPECT_EQ(am.load_texture(p2.string()), nullptr);
-    EXPECT_EQ(am.load_texture(p3.string()), nullptr);
+    EXPECT_FALSE(am.load_texture(p1.string()).ok());
+    EXPECT_FALSE(am.load_texture(p2.string()).ok());
+    EXPECT_FALSE(am.load_texture(p3.string()).ok());
     EXPECT_EQ(am.cache_size(), 0u);
     fs::remove(p1);
     fs::remove(p2);
@@ -410,7 +423,7 @@ TEST(AssetsMalformed, GltfTooManyBuffersRejectedBeforeLoading) {
     gltf += "]}";
     const auto p = write_tmp_text("ignis_bad_many_buf.gltf", gltf);
     AssetManager am;
-    EXPECT_NO_THROW(EXPECT_EQ(am.load_model(p.string()), nullptr));
+    EXPECT_NO_THROW(EXPECT_FALSE(am.load_model(p.string()).ok()));
     fs::remove(p);
 }
 
@@ -426,7 +439,7 @@ TEST(AssetsMalformed, GltfHugeDeclaredBufferRejectedBeforeAllocation) {
         "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":1,\"type\":\"VEC3\"}]}";
     const auto p = write_tmp_text("ignis_bad_huge_buf.gltf", gltf);
     AssetManager am;
-    EXPECT_NO_THROW(EXPECT_EQ(am.load_model(p.string()), nullptr));
+    EXPECT_NO_THROW(EXPECT_FALSE(am.load_model(p.string()).ok()));
     fs::remove(p);
 }
 
@@ -439,7 +452,7 @@ TEST(AssetsMalformed, GltfTooManyImagesRejected) {
     gltf += "]}";
     const auto p = write_tmp_text("ignis_bad_many_img.gltf", gltf);
     AssetManager am;
-    EXPECT_NO_THROW(EXPECT_EQ(am.load_model(p.string()), nullptr));
+    EXPECT_NO_THROW(EXPECT_FALSE(am.load_model(p.string()).ok()));
     fs::remove(p);
 }
 
@@ -490,8 +503,9 @@ TEST(AssetsMalformed, GlbLoadsFromDiskInEditorMode) {
     const auto glb = make_glb_triangle();
     const auto p = write_tmp_bytes("ignis_tri.glb", glb);
     AssetManager am; // EditorFilesystem
-    auto model = am.load_model(p.string());
-    ASSERT_NE(model, nullptr);
+    auto model_r = am.load_model(p.string());
+    ASSERT_TRUE(model_r.ok()) << model_r.error();
+    const auto& model = model_r.value();
     ASSERT_EQ(model->mesh->primitives.size(), 1u);
     EXPECT_EQ(model->mesh->primitives[0].positions.size(), 3u);
     fs::remove(p);
@@ -510,8 +524,9 @@ TEST(AssetsMalformed, GlbLoadsFromPakInPackageOnly) {
     AssetManager am;
     am.set_pak(&reader);
     am.set_access_mode(AssetAccessMode::PackageOnly);
-    auto model = am.load_model("assets/m.glb");
-    ASSERT_NE(model, nullptr);
+    auto model_r = am.load_model("assets/m.glb");
+    ASSERT_TRUE(model_r.ok()) << model_r.error();
+    const auto& model = model_r.value();
     ASSERT_EQ(model->mesh->primitives.size(), 1u);
     EXPECT_EQ(model->mesh->primitives[0].positions.size(), 3u);
     fs::remove(pak_path);
@@ -530,7 +545,7 @@ TEST(AssetsMalformed, GlbWithExternalBufferUriRejectedInPackageOnly) {
     AssetManager am;
     am.set_pak(&reader);
     am.set_access_mode(AssetAccessMode::PackageOnly);
-    EXPECT_EQ(am.load_model("assets/m.glb"), nullptr);
+    EXPECT_FALSE(am.load_model("assets/m.glb").ok());
     fs::remove(pak_path);
 }
 
@@ -540,7 +555,7 @@ TEST(AssetsSecurity, HdrHugeDimensionsRejectedBeforeAllocation) {
     const auto p = write_tmp_text("ignis_huge.hdr",
                                   "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 20000 +X 20000\n");
     AssetManager am;
-    EXPECT_EQ(am.load_texture(p.string()), nullptr);
+    EXPECT_FALSE(am.load_texture(p.string()).ok());
     fs::remove(p);
 }
 
@@ -567,6 +582,6 @@ TEST(AssetsSecurity, PngHugeButAllocatableDimensionsRejected) {
     be32(0); // crc (stb does not verify)
     const auto p = write_tmp_bytes("ignis_huge2.png", png);
     AssetManager am;
-    EXPECT_EQ(am.load_texture(p.string()), nullptr);
+    EXPECT_FALSE(am.load_texture(p.string()).ok());
     fs::remove(p);
 }

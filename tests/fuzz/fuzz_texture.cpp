@@ -10,12 +10,14 @@
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     if (size == 0 || size > 8u * 1024u * 1024u) return 0;
     const std::vector<ignis::u8> bytes(data, data + size);
-    if (auto tex = ignis::decode_texture_memory("fuzz.png", bytes, false)) {
+    if (auto r = ignis::decode_texture_memory("fuzz.png", bytes, false); r.ok()) {
+        const auto& tex = r.value();
         const size_t expected = static_cast<size_t>(tex->width) *
                                 static_cast<size_t>(tex->height) * 4u;
         if (tex->pixels.size() != expected) return 1; // inconsistent decode
     }
-    if (auto tex = ignis::decode_texture_memory("fuzz.hdr", bytes, true)) {
+    if (auto r = ignis::decode_texture_memory("fuzz.hdr", bytes, true); r.ok()) {
+        const auto& tex = r.value();
         const size_t expected = static_cast<size_t>(tex->width) *
                                 static_cast<size_t>(tex->height) * 4u;
         if (tex->hdr_pixels.size() != expected) return 1;

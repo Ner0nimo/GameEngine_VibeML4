@@ -329,8 +329,12 @@ int l_scene_save(lua_State* L) {
 
 int l_asset_load_model(lua_State* L) {
     const char* path = luaL_checkstring(L, 1);
-    auto model = get_assets(L)->load_model(path ? path : "");
-    if (!model) { lua_pushnil(L); return 1; }
+    auto r = get_assets(L)->load_model(path ? path : "");
+    if (!r.ok()) {
+        lua_pushnil(L);
+        lua_pushstring(L, r.error().c_str()); // nil, reason — the script decides
+        return 2;
+    }
     lua_pushboolean(L, 1);
     return 1;
 }

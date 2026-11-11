@@ -29,7 +29,9 @@ enum class AssetAccessMode {
 };
 
 // Loads and caches assets from disk or from an in-memory pak (see core/pak.h).
-// All loaders return nullptr on failure and log the reason.
+// Loaders return Result: success carries the asset, failure carries the
+// reason. The caller decides what to do with the error (log it, substitute a
+// documented placeholder, or fail) — a failed load is never concealed.
 class AssetManager {
 public:
     AssetManager() = default;
@@ -41,8 +43,8 @@ public:
     Result<std::vector<u8>> read_file(const std::string& path);
     Result<std::string> read_text(const std::string& path);
 
-    std::shared_ptr<Model> load_model(const std::string& path);    // .gltf/.glb
-    std::shared_ptr<Texture> load_texture(const std::string& path); // .png/.jpg/.hdr/...
+    Result<std::shared_ptr<Model>> load_model(const std::string& path);    // .gltf/.glb
+    Result<std::shared_ptr<Texture>> load_texture(const std::string& path); // .png/.jpg/.hdr/...
 
     // Optional pak overlay: when set, read_file prefers pak entries.
     void set_pak(class PakReader* pak) { pak_ = pak; }
@@ -58,8 +60,8 @@ public:
     void cache_texture(const std::string& path, std::shared_ptr<Texture> tex);
 
 private:
-    std::shared_ptr<Model> load_model_impl(const std::string& path);
-    std::shared_ptr<Texture> load_texture_impl(const std::string& path);
+    Result<std::shared_ptr<Model>> load_model_impl(const std::string& path);
+    Result<std::shared_ptr<Texture>> load_texture_impl(const std::string& path);
 
     std::unordered_map<std::string, std::shared_ptr<void>> cache_;
     class PakReader* pak_ = nullptr;

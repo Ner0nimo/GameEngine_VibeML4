@@ -140,8 +140,9 @@ CommandResult CommandProcessor::execute(const nlohmann::json& cmd) {
     if (c == "load_model") {
         auto scoped = scope_path(cmd.value("path", ""));
         if (!scoped.ok()) return fail(scoped.error());
-        auto model = assets_.load_model(scoped.value());
-        if (!model) return fail("cannot load model '" + scoped.value() + "'");
+        auto model_r = assets_.load_model(scoped.value());
+        if (!model_r.ok()) return fail(model_r.error());
+        const auto& model = model_r.value();
         return ok({{"primitives", model->mesh->primitives.size()},
                    {"materials", model->materials.size()},
                    {"textures", model->textures.size()}}, "model ok");
@@ -149,8 +150,9 @@ CommandResult CommandProcessor::execute(const nlohmann::json& cmd) {
     if (c == "load_texture") {
         auto scoped = scope_path(cmd.value("path", ""));
         if (!scoped.ok()) return fail(scoped.error());
-        auto tex = assets_.load_texture(scoped.value());
-        if (!tex) return fail("cannot load texture '" + scoped.value() + "'");
+        auto tex_r = assets_.load_texture(scoped.value());
+        if (!tex_r.ok()) return fail(tex_r.error());
+        const auto& tex = tex_r.value();
         return ok({{"width", tex->width}, {"height", tex->height}, {"hdr", tex->hdr}}, "texture ok");
     }
     if (c == "run_commands") {

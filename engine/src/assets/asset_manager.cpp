@@ -1,6 +1,5 @@
 #include "ignis/assets/asset_manager.h"
 
-#include "ignis/core/log.h"
 #include "ignis/core/pak.h"
 #include "ignis/core/path_util.h"
 #include "texture_decode.h"
@@ -8,6 +7,7 @@
 #include <stb_image.h>
 
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <sstream>
 
@@ -57,8 +57,8 @@ namespace ignis {
 
 namespace fs = std::filesystem;
 
-// Defined in texture_loader.cpp; decodes an in-memory image (png/jpg/hdr).
-std::shared_ptr<Texture> decode_texture_memory(
+// Defined below; decodes an in-memory image (png/jpg/hdr).
+Result<std::shared_ptr<Texture>> decode_texture_memory(
     const std::string& name, const std::vector<u8>& bytes, bool force_hdr);
 
 Result<std::vector<u8>> AssetManager::read_file(const std::string& path) {
@@ -90,40 +90,45 @@ Result<std::string> AssetManager::read_text(const std::string& path) {
     return Result<std::string>::success(std::string(b.begin(), b.end()));
 }
 
-std::shared_ptr<Texture> decode_texture_memory(
+Result<std::shared_ptr<Texture>> decode_texture_memory(
     const std::string& name, const std::vector<u8>& bytes, bool force_hdr) {
+    using TexResult = Result<std::shared_ptr<Texture>>;
     constexpr size_t kMaxImageBytes = 256ull << 20; // reject before size_t -> int
-    if (bytes.size() > kMaxImageBytes) return nullptr;
+    if (bytes.size() > kMaxImageBytes)
+        return TexResult::failure(std::format("'{}' too large ({} bytes)", name, bytes.size()));
     // Reject oversized decoded dimensions before stb allocates the output:
     // a tiny header can claim gigabytes of pixels.
     int iw = 0, ih = 0, icomp = 0;
     if (!stbi_info_from_memory(bytes.data(), static_cast<int>(bytes.size()), &iw, &ih, &icomp))
-        return nullptr;
+        return TexResult::failure(
+            std::format("stb_image failed on '{}': {}", name, stbi_failure_reason()));
     const long long max_pixels = force_hdr ? kMaxHdrTexturePixels : kMaxLdrTexturePixels;
-    if (static_cast<long long>(iw) * static_cast<long long>(ih) > max_pixels) {
-        IGNIS_WARN("decode_texture_memory: '{}' claims {}x{} (over the {} pixel cap)",
-                   name, iw, ih, max_pixels);
-        return nullptr;
-    }
+    if (static_cast<long long>(iw) * static_cast<long long>(ih) > max_pixels)
+        return TexResult::failure(std::format("'{}' claims {}x{} (over the {} pixel cap)",
+                                              name, iw, ih, max_pixels));
     auto tex = std::make_shared<Texture>();
     tex->name = name;
     int w = 0, h = 0, comp = 0;
     if (force_hdr) {
         float* data = stbi_loadf_from_memory(bytes.data(), static_cast<int>(bytes.size()), &w, &h, &comp, 4);
-        if (!data) return nullptr;
+        if (!data)
+            return TexResult::failure(
+                std::format("stb_image failed on '{}': {}", name, stbi_failure_reason()));
         tex->hdr = true;
         tex->width = w; tex->height = h; tex->channels = 4;
         tex->hdr_pixels.assign(data, data + static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
         stbi_image_free(data);
     } else {
         u8* data = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &w, &h, &comp, 4);
-        if (!data) return nullptr;
+        if (!data)
+            return TexResult::failure(
+                std::format("stb_image failed on '{}': {}", name, stbi_failure_reason()));
         tex->hdr = false;
         tex->width = w; tex->height = h; tex->channels = 4;
         tex->pixels.assign(data, data + static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
         stbi_image_free(data);
     }
-    return tex;
+    return TexResult::success(std::move(tex));
 }
 
 } // namespace ignis
