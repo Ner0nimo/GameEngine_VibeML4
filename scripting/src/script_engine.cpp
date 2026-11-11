@@ -327,6 +327,8 @@ int l_scene_save(lua_State* L) {
     return 1;
 }
 
+// ignis.assets.load_model(path) -> true on success; nil, reason on failure
+// (the loader's Result error travels to the script instead of being log-only).
 int l_asset_load_model(lua_State* L) {
     const char* path = luaL_checkstring(L, 1);
     auto r = get_assets(L)->load_model(path ? path : "");
