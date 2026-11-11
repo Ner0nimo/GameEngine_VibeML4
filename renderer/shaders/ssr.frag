@@ -59,8 +59,8 @@ void main() {
     // Start offset grows at grazing angles so the ray doesn't immediately
     // re-hit its own surface.
     const float t0 = 0.05 + (1.0 - NdotV) * 0.5;
-    const float tMax = min(ubo.params.w, 25.0);
-    const int STEPS = 128;
+    const float tMax = ubo.params.w;
+    const int STEPS = 64;
     const float THICKNESS = 0.15;
 
     // March and register a hit on a SIGN CHANGE (in-front -> behind), so a
@@ -97,10 +97,7 @@ void main() {
         prevT = tt;
         prevDiff = diff;
     }
-    if (hitT < 0.0) {
-        rt_ssr = vec4(viewPos.z < -2.0 ? 1.0 : 0.0, 1.0, 0.0, 1.0); // DEBUG: no hit (R=viewPos sane, G=always)
-        return;
-    }
+    if (hitT < 0.0) { rt_ssr = vec4(0.0); return; }
 
     // Confidence: screen-edge fade, ray-length fade, grazing-angle fade.
     float edge = smoothstep(0.0, 0.05, min(min(hitUV.x, 1.0 - hitUV.x), min(hitUV.y, 1.0 - hitUV.y)));
@@ -108,5 +105,5 @@ void main() {
     float confidence = edge * rayFade * NdotV;
 
     vec3 refl = texture(sampler2D(tex_hdr_prev, samp_hdr_prev), hitUV).rgb;
-    rt_ssr = vec4(1.0, 1.0, 1.0, 1.0); // DEBUG: hit
+    rt_ssr = vec4(refl, confidence);
 }

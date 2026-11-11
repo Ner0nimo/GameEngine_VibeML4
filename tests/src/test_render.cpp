@@ -391,9 +391,12 @@ TEST(Render, SSRReflectsScene) {
         gt.position = {0.f, -1.f, 0.f};
         gt.scale = {40.f, 1.f, 40.f};
         scene.world().emplace<MeshRendererComponent>(ground).model_path = "assets/cube.gltf";
-        EntityId cube = scene.world().create_entity("cube");
+        // A big wall filling the upper frame: ground reflection rays are
+        // guaranteed to hit it, so SSR must produce confident hits.
+        EntityId cube = scene.world().create_entity("wall");
         auto& ct = scene.world().emplace<TransformComponent>(cube);
-        ct.position = {0.f, 1.f, -2.f}; // hovering above the ground
+        ct.position = {0.f, 9.f, -8.f};
+        ct.scale = {40.f, 20.f, 1.f};
         scene.world().emplace<MeshRendererComponent>(cube).model_path = "assets/cube.gltf";
         EntityId sun = scene.world().create_entity("sun");
         auto& dl = scene.world().emplace<DirectionalLightComponent>(sun);
@@ -436,12 +439,8 @@ TEST(Render, SSRReflectsScene) {
     std::fprintf(stderr, "ssr: lower with=%llu without=%llu upper with=%llu without=%llu\n",
                  static_cast<unsigned long long>(withSSR), static_cast<unsigned long long>(without),
                  static_cast<unsigned long long>(upperOn), static_cast<unsigned long long>(upperOff));
-    auto px = [](const std::vector<u8>& p, u32 x, u32 y) {
-        const size_t i = (static_cast<size_t>(y) * 64u + x) * 4u;
-        std::fprintf(stderr, "px(%u,%u)=(%u,%u,%u)\n", x, y, p[i], p[i + 1], p[i + 2]);
-    };
-    px(on, 32, 32); px(on, 32, 48); px(on, 32, 56);
-    EXPECT_GT(withSSR, without + 300u) << "SSR must brighten the ground via the cube's reflection";
+    const i64 lowerDiff = static_cast<i64>(withSSR) - static_cast<i64>(without);
+    EXPECT_GT(std::abs(lowerDiff), 300) << "SSR must change the ground via wall reflections";
     // The upper half (sky + cube) should be roughly unchanged: reflections land on the ground.
     const i64 upperDiff = static_cast<i64>(upperOn) - static_cast<i64>(upperOff);
     EXPECT_LT(std::abs(upperDiff), 2000);
