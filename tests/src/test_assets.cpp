@@ -399,3 +399,46 @@ TEST(AssetsMalformed, CorruptTexturesReturnNull) {
     fs::remove(p2);
     fs::remove(p3);
 }
+
+TEST(AssetsMalformed, GltfTooManyBuffersRejectedBeforeLoading) {
+    // 2000 buffer entries: the count limit must reject before per-buffer work.
+    std::string gltf = "{\"asset\":{\"version\":\"2.0\"},\"buffers\":[";
+    for (int i = 0; i < 2000; ++i) {
+        if (i != 0) gltf += ",";
+        gltf += "{\"byteLength\":0}";
+    }
+    gltf += "]}";
+    const auto p = write_tmp_text("ignis_bad_many_buf.gltf", gltf);
+    AssetManager am;
+    EXPECT_NO_THROW(EXPECT_EQ(am.load_model(p.string()), nullptr));
+    fs::remove(p);
+}
+
+TEST(AssetsMalformed, GltfHugeDeclaredBufferRejectedBeforeAllocation) {
+    // byteLength claims 4 GiB but the data URI holds 8 bytes: the per-buffer
+    // cap must reject before cgltf allocates the declared size.
+    const std::string gltf =
+        std::string("{\"asset\":{\"version\":\"2.0\"},"
+        "\"buffers\":[{\"uri\":\"data:application/octet-stream;base64,") +
+        b64_encode(std::vector<u8>(8, 0)) +
+        "\",\"byteLength\":4294967295}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":8,\"target\":34962}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":1,\"type\":\"VEC3\"}]}";
+    const auto p = write_tmp_text("ignis_bad_huge_buf.gltf", gltf);
+    AssetManager am;
+    EXPECT_NO_THROW(EXPECT_EQ(am.load_model(p.string()), nullptr));
+    fs::remove(p);
+}
+
+TEST(AssetsMalformed, GltfTooManyImagesRejected) {
+    std::string gltf = "{\"asset\":{\"version\":\"2.0\"},\"images\":[";
+    for (int i = 0; i < 2000; ++i) {
+        if (i != 0) gltf += ",";
+        gltf += "{\"uri\":\"data:,\"}";
+    }
+    gltf += "]}";
+    const auto p = write_tmp_text("ignis_bad_many_img.gltf", gltf);
+    AssetManager am;
+    EXPECT_NO_THROW(EXPECT_EQ(am.load_model(p.string()), nullptr));
+    fs::remove(p);
+}

@@ -77,3 +77,17 @@ TEST(JsonParse, FailureNeverThrows) {
         EXPECT_FALSE(r.ok());
     });
 }
+
+TEST(JsonParse, WideShallowDocumentWithinDepthCapParses) {
+    // 200k sibling elements at depth 1: the depth cap must reject depth,
+    // not width.
+    std::string s = "[";
+    for (int i = 0; i < 200000; ++i) {
+        if (i != 0) s += ",";
+        s += "1";
+    }
+    s += "]";
+    auto r = parse_json_bounded(s);
+    ASSERT_TRUE(r.ok()) << r.error();
+    EXPECT_EQ(r.value().size(), 200000u);
+}

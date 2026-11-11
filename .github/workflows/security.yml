@@ -224,8 +224,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # AGENTS.md: deps are pinned via FetchContent GIT_TAG, never branches.
-      # Additionally require an immutable 40-hex commit SHA (not a moving tag)
-      # and an https:// GIT_REPOSITORY (no plain http).
+      # Require an immutable 40-hex commit SHA (not a moving tag), an
+      # https:// GIT_REPOSITORY (no plain http), and literal values with no
+      # variable expansion (the audit is regex-based by design; the allowed
+      # declaration format is documented in cmake/Dependencies.cmake).
       - name: Verify every FetchContent dependency is pinned to a commit SHA over https
         run: |
           python3 - <<'EOF'
@@ -239,13 +241,17 @@ jobs:
               if not tags:
                   problems.append(f'{name}: missing GIT_TAG')
               for t in tags:
-                  if not re.fullmatch(r'[0-9a-f]{40}', t):
+                  if '${' in t or '$(' in t:
+                      problems.append(f'{name}: GIT_TAG uses variable expansion: {t!r} (use a literal SHA)')
+                  elif not re.fullmatch(r'[0-9a-f]{40}', t):
                       problems.append(f'{name}: GIT_TAG {t!r} is not an immutable 40-hex commit SHA')
               for r in repos:
-                  if not r.startswith('https://'):
+                  if '${' in r or '$(' in r:
+                      problems.append(f'{name}: GIT_REPOSITORY uses variable expansion: {r!r}')
+                  elif not r.startswith('https://'):
                       problems.append(f'{name}: GIT_REPOSITORY {r!r} is not https')
           if problems:
               print('\n'.join(problems))
               sys.exit(1)
-          print(f'all {len(blocks)} FetchContent dependencies pinned to https + commit SHA')
+          print(f'all {len(blocks)} FetchContent dependencies pinned to https + literal commit SHA')
           EOF
