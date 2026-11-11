@@ -437,6 +437,12 @@ TEST(Render, SSRReflectsScene) {
                  static_cast<unsigned long long>(upperOn), static_cast<unsigned long long>(upperOff));
     const i64 lowerDiff = static_cast<i64>(withSSR) - static_cast<i64>(without);
     EXPECT_GT(std::abs(lowerDiff), 300) << "SSR must change the ground via wall reflections";
+    EXPECT_TRUE(false) << "force-print debug pixels";
+    auto px = [](const std::vector<u8>& p, u32 x, u32 y) {
+        const size_t i = (static_cast<size_t>(y) * 64u + x) * 4u;
+        std::fprintf(stderr, "px(%u,%u)=(%u,%u,%u)\n", x, y, p[i], p[i + 1], p[i + 2]);
+    };
+    px(on, 32, 16); px(on, 32, 32); px(on, 32, 48); px(on, 32, 56);
     // The upper half (sky + cube) should be roughly unchanged: reflections land on the ground.
     const i64 upperDiff = static_cast<i64>(upperOn) - static_cast<i64>(upperOff);
     EXPECT_LT(std::abs(upperDiff), 2000);
