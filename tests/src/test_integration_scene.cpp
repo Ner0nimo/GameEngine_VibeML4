@@ -23,6 +23,9 @@ TEST(Integration, TestSceneAllFeatures) {
     PhysicsSystem::register_components(scene.world());
     AudioSystem::register_components(scene.world());
     ASSERT_TRUE(scene.load_file(std::string(IGNIS_SCENES_DIR) + "/test_scene.scene.json").ok());
+    // Scene settings from the file are loaded (and round-trip on save).
+    EXPECT_EQ(scene.settings().gravity.y, -9.81f);
+    EXPECT_EQ(scene.settings().clear_color.z, 0.16f);
 
     AssetManager assets;
     ScriptEngine scripts;
@@ -121,6 +124,8 @@ TEST(Integration, TestSceneAllFeatures) {
     EXPECT_FALSE(j["entities"].empty());
     Scene reloaded = Scene::deserialize(j);
     EXPECT_EQ(reloaded.world().entity_count(), scene.world().entity_count());
+    EXPECT_EQ(reloaded.settings().clear_color.z, 0.16f); // settings survive serialize/deserialize
+    EXPECT_EQ(reloaded.settings().time_scale, scene.settings().time_scale);
     EntityId reloaded_emitter = NULL_ENTITY;
     for (EntityId e : reloaded.world().all_entities()) {
         if (reloaded.world().name_of(e) == "SoundEmitter") reloaded_emitter = e;

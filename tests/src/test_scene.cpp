@@ -313,3 +313,75 @@ TEST(Scene, SpawnPrefabSkipsUnknownAndMalformedComponents) {
     EXPECT_EQ(scene.world().name_of(e), "Weird");
     EXPECT_FALSE(scene.world().has<TransformComponent>(e));
 }
+
+TEST(Scene, SettingsDefaultsWhenAbsent) {
+    // Old scene files have no "settings" object: defaults must apply.
+    nlohmann::json j;
+    j["name"] = "legacy";
+    j["entities"] = nlohmann::json::array();
+    Scene scene = Scene::deserialize(j);
+    EXPECT_EQ(scene.settings().gravity.y, -9.81f);
+    EXPECT_EQ(scene.settings().time_scale, 1.f);
+    EXPECT_EQ(scene.settings().ambient_intensity, 0.f); // flat ambient off by default
+    EXPECT_EQ(scene.settings().ambient_color.x, 1.f);
+    EXPECT_EQ(scene.settings().clear_color.w, 1.f);
+}
+
+TEST(Scene, SettingsClampedToEditorRanges) {
+    nlohmann::json j;
+    j["name"] = "clamp";
+    j["entities"] = nlohmann::json::array();
+    j["settings"] = nlohmann::json::object();
+    j["settings"]["time_scale"] = -2;       // negative -> 0
+    j["settings"]["ambient_intensity"] = 1e30; // huge -> 10 (editor widget max)
+    Scene scene = Scene::deserialize(j);
+    EXPECT_EQ(scene.settings().time_scale, 0.f);
+    EXPECT_EQ(scene.settings().ambient_intensity, 10.f);
+
+    j["settings"]["time_scale"] = 1e30; // huge -> 4 (editor slider max)
+    j["settings"]["ambient_intensity"] = -5; // negative -> 0
+    Scene scene2 = Scene::deserialize(j);
+    EXPECT_EQ(scene2.settings().time_scale, 4.f);
+    EXPECT_EQ(scene2.settings().ambient_intensity, 0.f);
+}
+
+TEST(Scene, SettingsRoundTrip) {
+    Scene scene = make_scene();
+    scene.settings().gravity = {0.f, -5.f, 2.f};
+    scene.settings().time_scale = 0.5f;
+    scene.settings().ambient_color = {0.2f, 0.4f, 0.6f};
+    scene.settings().ambient_intensity = 2.5f;
+    scene.settings().clear_color = {0.1f, 0.2f, 0.3f, 1.f};
+
+    const nlohmann::json j = scene.serialize();
+    ASSERT_TRUE(j.contains("settings"));
+
+    Scene loaded = Scene::deserialize(j);
+    EXPECT_EQ(loaded.settings().gravity.y, -5.f);
+    EXPECT_EQ(loaded.settings().gravity.z, 2.f);
+    EXPECT_EQ(loaded.settings().time_scale, 0.5f);
+    EXPECT_EQ(loaded.settings().ambient_color.z, 0.6f);
+    EXPECT_EQ(loaded.settings().ambient_intensity, 2.5f);
+    EXPECT_EQ(loaded.settings().clear_color.y, 0.2f);
+
+    // load_json (editor reload / play snapshot restore) carries settings too.
+    Scene target = make_scene();
+    ASSERT_TRUE(target.load_json(j).ok());
+    EXPECT_EQ(target.settings().time_scale, 0.5f);
+    EXPECT_EQ(target.settings().gravity.x, 0.f);
+}
+
+TEST(Scene, SettingsTolerateMalformed) {
+    nlohmann::json j;
+    j["name"] = "broken-settings";
+    j["entities"] = nlohmann::json::array();
+    j["settings"] = nlohmann::json::object();
+    j["settings"]["gravity"] = "not-an-array";
+    j["settings"]["time_scale"] = "fast";
+    j["settings"]["ambient_color"] = {1, 2}; // wrong length
+    j["settings"]["ambient_intensity"] = 3;
+    Scene scene = Scene::deserialize(j); // must not throw
+    EXPECT_EQ(scene.settings().gravity.y, -9.81f); // default kept
+    EXPECT_EQ(scene.settings().time_scale, 1.f);   // default kept
+    EXPECT_EQ(scene.settings().ambient_intensity, 3.f); // valid field applied
+}

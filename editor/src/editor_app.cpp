@@ -160,7 +160,7 @@ Result<void> EditorApp::init_scene_and_systems(const std::string& scene_path,
     audio_sys_ = std::make_unique<AudioSystem>(*audio_, scene_.get());
     AudioSystem::register_lua_bindings(scripts_->state());
     physics_ = std::make_unique<PhysicsSystem>(*scene_);
-    if (auto r = physics_->init({0.f, -9.81f, 0.f}); !r.ok())
+    if (auto r = physics_->init(scene_->settings().gravity); !r.ok())
         return Result<void>::failure("physics init failed: " + r.error());
     PhysicsSystem::register_lua_bindings(scripts_->state());
     scene_->add_system([&](World&, f32 dt) { scripts_->update(dt); });
@@ -1536,9 +1536,52 @@ void EditorApp::draw_bottom_panel(f32 dt) {
             draw_stats(dt);
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem("Scene")) {
+            item_tooltip("scene-level settings: gravity, time scale, ambient light, clear color");
+            bottom_tab_ = 3;
+            draw_scene_settings();
+            ImGui::EndTabItem();
+        }
         ImGui::EndTabBar();
     }
     ImGui::End();
+}
+
+void EditorApp::draw_scene_settings() {
+    SceneSettings& s = scene_->settings();
+    if (ImGui::DragFloat3("gravity", &s.gravity.x, 0.1f, -100.f, 100.f))
+        physics_->set_gravity(s.gravity); // live: affects a running simulation
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("world gravity, applied live to the physics simulation");
+    ImGui::SliderFloat("time scale", &s.time_scale, 0.f, 4.f); // read in main_loop
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("scales simulation time while playing (0 = frozen); render fps is unaffected");
+    ImGui::ColorEdit3("ambient color", &s.ambient_color.x);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("flat ambient light color (kept separate from IBL environment lighting)");
+    ImGui::DragFloat("ambient intensity", &s.ambient_intensity, 0.01f, 0.f, 10.f);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("strength of the flat ambient light");
+    ImGui::ColorEdit4("clear color (scene default)", &s.clear_color.x);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("scene-level default clear color; the active camera's own clear color overrides it");
+    if (ImGui::Button("Apply clear color to active camera")) {
+        const EntityId cam = find_active_camera();
+        if (cam != NULL_ENTITY) {
+            if (auto* cc = scene_->world().get<CameraComponent>(cam)) cc->clear_color = s.clear_color;
+        } else {
+            IGNIS_WARN("no active camera to apply the clear color to");
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("explicitly copy the scene default clear color into the active camera component");
+    ImGui::Separator();
+    if (ImGui::Button("Reset to defaults")) {
+        s = SceneSettings{};
+        physics_->set_gravity(s.gravity);
+        IGNIS_INFO("scene settings reset to defaults");
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("restore default gravity, time scale, ambient and clear color");
+    ImGui::TextDisabled("saved into the scene JSON (Ctrl+S) and used by the runtime/export");
 }
 
 void EditorApp::draw_status_bar(f32 dt) {
@@ -1645,7 +1688,8 @@ void EditorApp::main_loop() {
         if (std::fabs(cs.x - content_scale_) > 0.01f) apply_content_scale(cs.x);
 
         handle_viewport_input(camera, camEntity, dt);
-        if (playing_) scene_->update(dt);
+        // time_scale affects simulation time only, never the render frame rate
+        if (playing_) scene_->update(dt * scene_->settings().time_scale);
         update_camera(camera, camEntity);
         handle_shortcuts();
 

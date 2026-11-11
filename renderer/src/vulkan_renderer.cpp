@@ -119,6 +119,8 @@ struct LightUBO {
     f32 shadowMaxPenumbra;
     f32 shadowLightSize;
     f32 _pad2;
+    alignas(16) math::Vec3 ambientColor; // flat ambient term, separate from IBL
+    f32 _padAmb;
     alignas(16) math::Vec4 clearColor;
     // Local lights (unshadowed). Arrays are fixed-size std140 vec4s.
     alignas(16) math::Vec4 pointPosRange[kMaxPointLights]; // xyz = world pos, w = range
@@ -136,7 +138,8 @@ struct LightUBO {
     alignas(16) math::Vec4 cascadeFrustum[kCascadeCount];  // x = znear, y = zspan, z = box width
 };
 // Must match the std140 layout of the UniformBuffer in lighting.frag.
-static_assert(sizeof(LightUBO) == 1120, "LightUBO/std140 layout drifted");
+// 1136 = 1120 + 16 for ambientColor (vec3 + pad) added before clearColor.
+static_assert(sizeof(LightUBO) == 1136, "LightUBO/std140 layout drifted");
 
 struct SSAOUBO {
     alignas(16) math::Mat4 proj;
@@ -1550,7 +1553,12 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         lu.lightViewProj = lightViewProj;
         lu.shadowMapInvSize = math::Vec2(1.f / static_cast<f32>(kShadowMapSize));
         lu.shadowBias = 0.005f;
+        // Scene-level settings; the active camera's own clear color overrides
+        // the scene default below (camera-specific setting, not conflated).
+        // ambientStrength stays 1.0 for the IBL term; the flat ambient term
+        // carries its own intensity, pre-multiplied into ambientColor.
         lu.ambientStrength = 1.f;
+        lu.ambientColor = scene.settings().ambient_color * scene.settings().ambient_intensity;
         lu.envMipLevels = static_cast<f32>(kEnvMipLevels);
         lu.shadowSearchTexels = 6.f;
         lu.shadowMaxPenumbra = 16.f;
@@ -1598,8 +1606,8 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
             ++spotCount;
         }
         lu.lightCounts = math::Vec2(static_cast<f32>(pointCount), static_cast<f32>(spotCount));
-        // clear color from active camera component
-        lu.clearColor = math::Vec4(0.02f, 0.02f, 0.03f, 1.f);
+        // clear color: scene default, overridden by the active camera component
+        lu.clearColor = scene.settings().clear_color;
         for (EntityId e : scene.world().view<CameraComponent>()) {
             if (const auto* c = scene.world().get<CameraComponent>(e)) {
                 if (c->active) lu.clearColor = c->clear_color;

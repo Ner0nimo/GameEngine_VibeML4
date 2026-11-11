@@ -95,7 +95,7 @@ private:
     bool show_statusbar_ = true;
     bool show_overlay_ = true;  // viewport text overlay
     bool show_help_ = false;
-    int bottom_tab_ = 0; // 0 = console, 1 = assets, 2 = stats
+    int bottom_tab_ = 0; // 0 = console, 1 = assets, 2 = stats, 3 = scene settings
     std::vector<std::pair<LogLevel, std::string>> console_;
     std::mutex console_mutex_;
     char console_filter_[128] = "";
@@ -155,6 +155,7 @@ private:
     void draw_console_input();
     void draw_asset_browser();
     void draw_stats(f32 dt);
+    void draw_scene_settings();
     void draw_status_bar(f32 dt);
     void draw_viewport_gizmo(const Camera& camera, f32 aspect);
     void draw_viewport_overlay(const Camera& camera, EntityId cam_entity);
