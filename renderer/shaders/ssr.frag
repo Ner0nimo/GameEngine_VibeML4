@@ -108,5 +108,5 @@ void main() {
     float confidence = edge * rayFade * NdotV * ubo.params.y; // y = strength
 
     vec3 refl = texture(sampler2D(tex_hdr_prev, samp_hdr_prev), hitUV).rgb;
-    rt_ssr = vec4(edge, rayFade, NdotV * ubo.params.y, 1.0); // DEBUG: confidence factors
+    rt_ssr = vec4(vec3(confidence), confidence); // DEBUG: real confidence
 }
