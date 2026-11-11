@@ -125,6 +125,11 @@ private:
     f32 editor_ortho_size_ = 10.f;
     f32 cam_speed_ = 6.f;         // fly speed in units/s (Shift = 4x)
     f64 scroll_pending_ = 0.0;    // accumulated wheel delta, consumed by handle_viewport_input
+    // Viewport debug-draw toggles (editor state, persisted in editor_state.json).
+    bool dbg_colliders_ = true;    // collider wireframes, colored by rigid-body type
+    bool dbg_selection_ = true;    // world AABB outline around the selected entity
+    bool dbg_grid_ = false;        // XZ ground grid
+    bool dbg_axes_ = false;        // RGB world axes at the origin
 
     static bool probe_vulkan_device();
     Result<void> init_window_and_renderer();
@@ -161,6 +166,7 @@ private:
     void set_standalone_camera(bool on, EntityId cam_entity);
     void load_editor_state();
     void save_editor_state() const;
+    std::vector<DebugLine> build_debug_lines() const;
     void frame_view(const math::Vec3& center, f32 radius, f32 aspect, EntityId cam_entity);
     void draw_menu_bar();
     void draw_open_scene_menu();

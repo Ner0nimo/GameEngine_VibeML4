@@ -25,6 +25,7 @@
 #include <imgui_impl_vulkan.h>
 
 #include "ignis/ecs/component_registry.h"
+#include "ignis/physics/debug_draw.h"
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -621,6 +622,10 @@ void EditorApp::load_editor_state() {
         editor_ortho_ = j.value("ortho", false);
         editor_ortho_size_ = j.value("ortho_size", 10.f);
         cam_speed_ = j.value("fly_speed", 6.f);
+        dbg_colliders_ = j.value("debug_colliders", true);
+        dbg_selection_ = j.value("debug_selection", true);
+        dbg_grid_ = j.value("debug_grid", false);
+        dbg_axes_ = j.value("debug_axes", false);
         if (j.contains("editor_cam")) {
             const nlohmann::json& c = j["editor_cam"];
             const auto vec3 = [](const nlohmann::json& a) {
@@ -645,6 +650,10 @@ void EditorApp::save_editor_state() const {
     j["ortho"] = editor_ortho_;
     j["ortho_size"] = editor_ortho_size_;
     j["fly_speed"] = cam_speed_;
+    j["debug_colliders"] = dbg_colliders_;
+    j["debug_selection"] = dbg_selection_;
+    j["debug_grid"] = dbg_grid_;
+    j["debug_axes"] = dbg_axes_;
     j["editor_cam"] = {{"position", {editor_cam_.position.x, editor_cam_.position.y, editor_cam_.position.z}},
                        {"rotation", {editor_cam_.rotation.w, editor_cam_.rotation.x, editor_cam_.rotation.y,
                                      editor_cam_.rotation.z}},
@@ -1058,6 +1067,16 @@ void EditorApp::draw_menu_bar() {
         item_tooltip("show/hide the status bar at the bottom");
         ImGui::MenuItem("Viewport overlay", nullptr, &show_overlay_);
         item_tooltip("show/hide the scene/camera/selection overlay drawn on the viewport");
+        ImGui::Separator();
+        const bool t_colliders = ImGui::MenuItem("Colliders", nullptr, &dbg_colliders_);
+        item_tooltip("draw collider wireframes (color = rigid-body type: static grey, kinematic yellow, dynamic green)");
+        const bool t_selection = ImGui::MenuItem("Selection outline", nullptr, &dbg_selection_);
+        item_tooltip("draw the selected entity's world AABB in orange");
+        const bool t_grid = ImGui::MenuItem("Ground grid", nullptr, &dbg_grid_);
+        item_tooltip("draw a 1m grid on the XZ plane at y=0");
+        const bool t_axes = ImGui::MenuItem("World axes", nullptr, &dbg_axes_);
+        item_tooltip("draw 1m RGB axes at the world origin");
+        if (t_colliders || t_selection || t_grid || t_axes) save_editor_state();
         ImGui::Separator();
         if (ImGui::MenuItem("Standalone editor camera", nullptr, standalone_cam_))
             set_standalone_camera(!standalone_cam_, find_active_camera());
@@ -1892,6 +1911,65 @@ void EditorApp::draw_viewport_overlay(const Camera& camera, EntityId cam_entity)
     dl->AddText(pos, IM_COL32(220, 220, 220, 255), buf);
 }
 
+// Geometry for the viewport debug toggles, fed into the renderer's DebugLine
+// channel. Geometry generation lives in physics (debug_draw.h) for colliders;
+// grid/axes/selection are trivial world-space segments built here.
+std::vector<DebugLine> EditorApp::build_debug_lines() const {
+    constexpr u32 kMaxDebugLines = 4096; // matches the renderer's line VB capacity
+    std::vector<DebugLine> out;
+    auto add = [&out](const DebugSegment& s, const math::Vec4& color) {
+        if (out.size() < kMaxDebugLines) out.push_back({s.a, s.b, color});
+    };
+    if (dbg_axes_) {
+        const math::Vec3 o(0.f);
+        add({o, math::Vec3(1.f, 0.f, 0.f)}, {1.f, 0.2f, 0.2f, 1.f}); // X red
+        add({o, math::Vec3(0.f, 1.f, 0.f)}, {0.2f, 1.f, 0.2f, 1.f}); // Y green
+        add({o, math::Vec3(0.f, 0.f, 1.f)}, {0.2f, 0.4f, 1.f, 1.f}); // Z blue
+    }
+    if (dbg_grid_) {
+        // XZ plane at y=0, 1m cells, +/-10m.
+        const math::Vec4 c(0.35f, 0.35f, 0.38f, 1.f);
+        for (int i = -10; i <= 10; ++i) {
+            const f32 v = static_cast<f32>(i);
+            add({math::Vec3(v, 0.f, -10.f), math::Vec3(v, 0.f, 10.f)}, c);
+            add({math::Vec3(-10.f, 0.f, v), math::Vec3(10.f, 0.f, v)}, c);
+        }
+    }
+    World& w = scene_->world();
+    if (dbg_selection_ && selected_ != NULL_ENTITY && w.alive(selected_)) {
+        if (const auto* tc = w.get<TransformComponent>(selected_)) {
+            const math::Mat4 wm = world_matrix(w, selected_);
+            const math::Vec3 center{static_cast<f32>(wm[3][0]), static_cast<f32>(wm[3][1]),
+                                    static_cast<f32>(wm[3][2])};
+            // Prefer the collider's own half extents when present.
+            math::Vec3 half = tc->scale * 0.5f;
+            if (const auto* col = w.get<ColliderComponent>(selected_)) {
+                if (col->shape == ColliderComponent::Shape::Box) half = col->half_extents;
+            }
+            for (const auto& s : aabb_edges(center, half))
+                add(s, math::Vec4(1.f, 0.5f, 0.1f, 1.f)); // orange
+        }
+    }
+    if (dbg_colliders_) {
+        for (EntityId e : w.all_entities()) {
+            const auto* col = w.get<ColliderComponent>(e);
+            if (!col) continue;
+            math::Vec4 color(0.8f, 0.8f, 0.8f, 1.f); // no rigid body: grey
+            if (const auto* rb = w.get<RigidBodyComponent>(e)) {
+                color = rb->type == RigidBodyComponent::Type::Static ? math::Vec4(0.55f, 0.55f, 0.55f, 1.f)
+                      : rb->type == RigidBodyComponent::Type::Kinematic ? math::Vec4(1.f, 0.85f, 0.3f, 1.f)
+                                                                        : math::Vec4(0.3f, 1.f, 0.4f, 1.f);
+            }
+            // Full collider transform: entity hierarchy and rotation included.
+            const math::Mat4 wm = world_matrix(w, e);
+            for (const auto& s : collider_wireframe_edges(*col, wm)) add(s, color);
+        }
+    }
+    if (out.size() >= kMaxDebugLines)
+        IGNIS_WARN("debug lines capped at {} segments", kMaxDebugLines);
+    return out;
+}
+
 void EditorApp::main_loop() {
     ImGuiIO& io = ImGui::GetIO();
     (void)io;
@@ -1934,6 +2012,7 @@ void EditorApp::main_loop() {
 
         // --- scene render first: a pending resize is processed here (after
         // waitForIdle, swapchain recreated) before the UI frame starts.
+        renderer_->set_debug_lines(build_debug_lines());
         renderer_->render(*scene_, camera, dt);
 
         // If the swapchain was recreated this frame, rebuild the
