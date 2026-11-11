@@ -158,9 +158,20 @@ void PhysicsSystem::sync_bodies(World& world) {
 
     // Create bodies for new entities; update type/mass/collider for existing.
     for (EntityId e : world.view<RigidBodyComponent, ColliderComponent, TransformComponent>()) {
-        const auto* rb = world.get<RigidBodyComponent>(e);
-        const auto* col = world.get<ColliderComponent>(e);
-        const auto* tr = world.get<TransformComponent>(e);
+        // Sanitize at the simulation boundary too: components can also be set
+        // via direct C++ emplace (editor), bypassing deserialization checks.
+        RigidBodyComponent rbv = *world.get<RigidBodyComponent>(e);
+        ColliderComponent colv = *world.get<ColliderComponent>(e);
+        TransformComponent trv = *world.get<TransformComponent>(e);
+        sanitize(rbv);
+        sanitize(colv);
+        sanitize(trv);
+        *world.get<RigidBodyComponent>(e) = rbv;   // write back so world state
+        *world.get<ColliderComponent>(e) = colv;   // stays consistent with the
+        *world.get<TransformComponent>(e) = trv;   // values the sim actually uses
+        const RigidBodyComponent* rb = &rbv;
+        const ColliderComponent* col = &colv;
+        const TransformComponent* tr = &trv;
 
         auto it = bodies_.find(e);
         if (it == bodies_.end()) {

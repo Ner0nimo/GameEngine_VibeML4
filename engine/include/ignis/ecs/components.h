@@ -7,6 +7,7 @@
 
 #include <glm/gtc/quaternion.hpp>
 
+#include <cmath>
 #include <string>
 
 namespace ignis {
@@ -24,6 +25,23 @@ struct TransformComponent {
                glm::scale(math::Mat4(1.f), scale);
     }
 };
+
+// Clamps untrusted transform values into valid ranges: finite position/scale
+// (positive scale), and a normalized nonzero rotation quaternion. Used at
+// deserialization so a malformed scene cannot inject NaN/inf or degenerate
+// transforms into the engine.
+inline void sanitize(TransformComponent& t) {
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(t.position[i])) t.position[i] = 0.f;
+        if (!std::isfinite(t.scale[i]) || t.scale[i] <= 0.f) t.scale[i] = 1.f;
+    }
+    const f32 len2 = glm::dot(t.rotation, t.rotation);
+    if (!std::isfinite(len2) || len2 < 1e-12f) {
+        t.rotation = math::Quat(1.f, 0.f, 0.f, 0.f); // identity
+    } else {
+        t.rotation = glm::normalize(t.rotation);
+    }
+}
 
 // World-space transform, computed by walking the parent chain. The hierarchy
 // is acyclic by construction (World::set_parent rejects cycles), so the walk
@@ -112,6 +130,7 @@ struct ComponentIO<TransformComponent> {
         if (j.contains("position")) ::ignis::from_json(j["position"], t.position);
         if (j.contains("rotation")) ::ignis::from_json(j["rotation"], t.rotation);
         if (j.contains("scale")) ::ignis::from_json(j["scale"], t.scale);
+        sanitize(t);
         return t;
     }
 };
