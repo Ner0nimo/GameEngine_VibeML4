@@ -55,7 +55,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential ninja-build cmake git
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: cpp
           queries: security-and-quality
@@ -85,7 +85,7 @@ jobs:
             libxkbcommon-dev libwayland-dev wayland-protocols \
             libvulkan-dev glslang-tools libasound2-dev libpulse-dev
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: cpp
           queries: security-and-quality
