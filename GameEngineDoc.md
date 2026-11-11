@@ -64,7 +64,9 @@ We're building a production-grade, simple and straight-forward 3D Game Engine fo
   the previous frame's lit HDR as the reflection color, replacing the IBL
   specular by hit confidence in the lighting pass; `VulkanRenderer::set_ssr()`
   tunes it. Hi-Z coarse pass / roughness mip blur can later replace the linear
-  march in `ssr.frag` without changing hit/refine/blend logic
+  march in `ssr.frag` without changing hit/refine/blend logic. Known
+  limitation: the reflection history (previous frame's HDR) is not reprojected
+  with motion vectors yet — pairs with the TAA work (issue #65)
 
 ## 3D Physics
 - Use simple 3D physics library of your choosing
