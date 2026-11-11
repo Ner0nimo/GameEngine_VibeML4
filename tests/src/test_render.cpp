@@ -41,20 +41,20 @@ Scene make_render_scene() {
 
     EntityId cube = scene.world().create_entity("cube");
     scene.world().emplace<TransformComponent>(cube);
-    auto& mr = scene.world().emplace<MeshRendererComponent>(cube);
-    mr.model_path = "assets/cube.gltf";
+    auto* mr = scene.world().emplace<MeshRendererComponent>(cube);
+    mr->model_path = "assets/cube.gltf";
 
     EntityId cam = scene.world().create_entity("cam");
-    auto& ct = scene.world().emplace<TransformComponent>(cam);
-    ct.position = {0.f, 0.f, 3.f};
-    auto& cc = scene.world().emplace<CameraComponent>(cam);
-    cc.active = true;
-    cc.clear_color = {0.02f, 0.02f, 0.03f, 1.f};
+    auto* ct = scene.world().emplace<TransformComponent>(cam);
+    ct->position = {0.f, 0.f, 3.f};
+    auto* cc = scene.world().emplace<CameraComponent>(cam);
+    cc->active = true;
+    cc->clear_color = {0.02f, 0.02f, 0.03f, 1.f};
 
     EntityId sun = scene.world().create_entity("sun");
-    auto& dl = scene.world().emplace<DirectionalLightComponent>(sun);
-    dl.direction = {0.f, -1.f, -0.5f};
-    dl.intensity = 3.f;
+    auto* dl = scene.world().emplace<DirectionalLightComponent>(sun);
+    dl->direction = {0.f, -1.f, -0.5f};
+    dl->intensity = 3.f;
     return scene;
 }
 
@@ -246,14 +246,14 @@ TEST(Render, PointLightLightsCube) {
             }
         }
         EntityId lamp = scene.world().create_entity("lamp");
-        auto& lt = scene.world().emplace<TransformComponent>(lamp);
+        auto* lt = scene.world().emplace<TransformComponent>(lamp);
         // Behind the cube: the camera-visible face at the frame center has
         // normal (0,0,-1) (back-face culling), so the light must sit behind.
-        lt.position = {0.f, 0.5f, -1.5f};
-        auto& pl = scene.world().emplace<PointLightComponent>(lamp);
-        pl.color = {1.f, 1.f, 1.f};
-        pl.intensity = point_intensity;
-        pl.range = 5.f;
+        lt->position = {0.f, 0.5f, -1.5f};
+        auto* pl = scene.world().emplace<PointLightComponent>(lamp);
+        pl->color = {1.f, 1.f, 1.f};
+        pl->intensity = point_intensity;
+        pl->range = 5.f;
         Camera camera;
         camera.position = {0.f, 0.f, 3.f};
         camera.fov_y_deg = 60.f;
@@ -291,20 +291,20 @@ TEST(Render, CSMShadowsFarGeometry) {
         Scene scene("csm");
         register_builtin_components(scene.world());
         EntityId ground = scene.world().create_entity("ground");
-        auto& gt = scene.world().emplace<TransformComponent>(ground);
-        gt.position = {0.f, -2.f, -40.f};
-        gt.scale = {60.f, 1.f, 60.f};
-        scene.world().emplace<MeshRendererComponent>(ground).model_path = "assets/cube.gltf";
+        auto* gt = scene.world().emplace<TransformComponent>(ground);
+        gt->position = {0.f, -2.f, -40.f};
+        gt->scale = {60.f, 1.f, 60.f};
+        scene.world().emplace<MeshRendererComponent>(ground)->model_path = "assets/cube.gltf";
         EntityId blocker = scene.world().create_entity("blocker");
-        auto& bt = scene.world().emplace<TransformComponent>(blocker);
-        bt.position = {0.f, 4.f, -45.f};
-        bt.scale = {2.f, 2.f, 2.f};
-        scene.world().emplace<MeshRendererComponent>(blocker).model_path = "assets/cube.gltf";
+        auto* bt = scene.world().emplace<TransformComponent>(blocker);
+        bt->position = {0.f, 4.f, -45.f};
+        bt->scale = {2.f, 2.f, 2.f};
+        scene.world().emplace<MeshRendererComponent>(blocker)->model_path = "assets/cube.gltf";
         EntityId sun = scene.world().create_entity("sun");
-        auto& dl = scene.world().emplace<DirectionalLightComponent>(sun);
-        dl.direction = {0.f, -1.f, -0.5f};
-        dl.intensity = 3.f;
-        dl.cast_shadow = true;
+        auto* dl = scene.world().emplace<DirectionalLightComponent>(sun);
+        dl->direction = {0.f, -1.f, -0.5f};
+        dl->intensity = 3.f;
+        dl->cast_shadow = true;
         Camera camera;
         camera.position = {0.f, 0.f, 3.f};
         camera.fov_y_deg = 60.f;
@@ -387,21 +387,21 @@ TEST(Render, SSRReflectsScene) {
         Scene scene("ssr");
         register_builtin_components(scene.world());
         EntityId ground = scene.world().create_entity("ground");
-        auto& gt = scene.world().emplace<TransformComponent>(ground);
-        gt.position = {0.f, -1.f, 0.f};
-        gt.scale = {40.f, 1.f, 40.f};
-        scene.world().emplace<MeshRendererComponent>(ground).model_path = "assets/cube.gltf";
+        auto* gt = scene.world().emplace<TransformComponent>(ground);
+        gt->position = {0.f, -1.f, 0.f};
+        gt->scale = {40.f, 1.f, 40.f};
+        scene.world().emplace<MeshRendererComponent>(ground)->model_path = "assets/cube.gltf";
         // A big wall filling the upper frame: ground reflection rays are
         // guaranteed to hit it, so SSR must produce confident hits.
         EntityId wall = scene.world().create_entity("wall");
-        auto& ct = scene.world().emplace<TransformComponent>(wall);
-        ct.position = {0.f, 4.5f, -4.f};
-        ct.scale = {60.f, 11.f, 1.f}; // fills the upper frame
-        scene.world().emplace<MeshRendererComponent>(wall).model_path = "assets/cube.gltf";
+        auto* ct = scene.world().emplace<TransformComponent>(wall);
+        ct->position = {0.f, 4.5f, -4.f};
+        ct->scale = {60.f, 11.f, 1.f}; // fills the upper frame
+        scene.world().emplace<MeshRendererComponent>(wall)->model_path = "assets/cube.gltf";
         EntityId sun = scene.world().create_entity("sun");
-        auto& dl = scene.world().emplace<DirectionalLightComponent>(sun);
-        dl.direction = {0.f, -1.f, -0.5f};
-        dl.intensity = 3.f;
+        auto* dl = scene.world().emplace<DirectionalLightComponent>(sun);
+        dl->direction = {0.f, -1.f, -0.5f};
+        dl->intensity = 3.f;
         Camera camera;
         camera.position = {0.f, 0.5f, 3.f}; // level: ground lower third, wall above
         camera.fov_y_deg = 60.f;
@@ -440,12 +440,12 @@ TEST(Render, DebugLinesDrawn) {
     Scene scene("lines");
     register_builtin_components(scene.world());
     EntityId cam = scene.world().create_entity("cam");
-    auto& ct = scene.world().emplace<TransformComponent>(cam);
-    ct.position = {0.f, 0.f, 3.f};
-    auto& cc = scene.world().emplace<CameraComponent>(cam);
-    cc.active = true;
+    auto* ct = scene.world().emplace<TransformComponent>(cam);
+    ct->position = {0.f, 0.f, 3.f};
+    auto* cc = scene.world().emplace<CameraComponent>(cam);
+    cc->active = true;
     EntityId sun = scene.world().create_entity("sun");
-    scene.world().emplace<DirectionalLightComponent>(sun).direction = {0.f, -1.f, -0.5f};
+    scene.world().emplace<DirectionalLightComponent>(sun)->direction = {0.f, -1.f, -0.5f};
 
     Camera camera;
     camera.position = {0.f, 0.f, 3.f};
@@ -636,12 +636,12 @@ TEST(Render, PointLightGatherView) {
     Scene scene("t");
     register_builtin_components(scene.world());
     EntityId lamp = scene.world().create_entity("lamp");
-    auto& lt = scene.world().emplace<TransformComponent>(lamp);
-    lt.position = {0.f, 1.f, 2.f};
-    auto& pl = scene.world().emplace<PointLightComponent>(lamp);
-    pl.color = {1.f, 1.f, 1.f};
-    pl.intensity = 50.f;
-    pl.range = 10.f;
+    auto* lt = scene.world().emplace<TransformComponent>(lamp);
+    lt->position = {0.f, 1.f, 2.f};
+    auto* pl = scene.world().emplace<PointLightComponent>(lamp);
+    pl->color = {1.f, 1.f, 1.f};
+    pl->intensity = 50.f;
+    pl->range = 10.f;
     u32 n = 0;
     for (EntityId e : scene.world().view<PointLightComponent, TransformComponent>()) {
         const auto* p = scene.world().get<PointLightComponent>(e);

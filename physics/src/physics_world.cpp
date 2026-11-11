@@ -82,7 +82,7 @@ void PhysicsSystem::register_components(World& world) {
     // (ComponentIO specializations live next to the components; register them here.)
 }
 
-PhysicsSystem::PhysicsSystem(Scene& scene) : scene_(&scene) {}
+PhysicsSystem::PhysicsSystem(Scene&) {} // scene no longer stored; world passed to update()
 
 PhysicsSystem::~PhysicsSystem() {
     shutdown();

@@ -268,7 +268,7 @@ int l_entity_has_component(lua_State* L) {
     const World& w = get_scene(L)->world();
     const ComponentTypeInfo* info = w.registry().find_by_name(comp ? comp : "");
     bool has = false;
-    if (info) {
+    if (info && w.alive(e)) { // storage presence is not liveness
         for (const auto& [type, storage] : w.storages()) {
             if (type == info->type) { has = storage->has(e); break; }
         }
