@@ -54,8 +54,9 @@ Rules for PRs from agents:
   `tests/fuzz/` for any new file format.
 - Never add a GitHub Action or a dependency without a pinned commit SHA; never
   commit secrets. Dependabot bumps the pinned action SHAs weekly.
-- `.github/CODEOWNERS` requires owner review for workflow and dependency
-  changes.
+- `.github/CODEOWNERS` requires owner review only for CI/dependency
+  infrastructure and the security-critical parsers (core/assets/agent/audio
+  sources, fuzz harnesses); general engine code is open to any reviewer.
 
 ## Architecture
 

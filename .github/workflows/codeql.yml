@@ -68,3 +68,30 @@ jobs:
         run: cmake --build --preset headless -j
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
+
+  analyze-graphics:
+    # The headless preset does not compile the graphics TUs; this job builds
+    # the full preset so window/renderer/editor code is analyzed too.
+    name: CodeQL analyze graphics build (full preset)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install toolchain + graphics deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build cmake git \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols \
+            libvulkan-dev glslang-tools libasound2-dev libpulse-dev
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
+        with:
+          languages: cpp
+          queries: security-and-quality
+      - name: Configure full preset (editor + Vulkan renderer + window)
+        run: cmake --preset full
+      - name: Build (full)
+        run: cmake --build --preset full -j
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
