@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "ignis/ecs/components.h"
+#include "ignis/physics/debug_draw.h"
 #include "ignis/physics/physics_world.h"
 #include "ignis/scene/scene.h"
 
@@ -208,4 +209,81 @@ TEST(PhysicsSecurity, SyncBodiesClampsDirectlyEmplacedGarbage) {
     // Sanitized values are written back to the world.
     EXPECT_EQ(scene.world().get<RigidBodyComponent>(box)->mass, 1.f);
     EXPECT_EQ(scene.world().get<ColliderComponent>(box)->radius, 0.5f);
+}
+
+// --- editor debug-draw geometry (issue #14) -----------------------------------
+
+TEST(PhysicsDebugDraw, BoxWireframeHas12Edges) {
+    ColliderComponent c;
+    c.shape = ColliderComponent::Shape::Box;
+    c.half_extents = {1.f, 2.f, 3.f};
+    const auto edges = collider_wireframe_edges(c, math::Mat4(1.f));
+    EXPECT_EQ(edges.size(), 12u);
+    // All corners of the box must appear as edge endpoints.
+    for (const auto& [a, b] : edges) {
+        for (const math::Vec3* p : {&a, &b}) {
+            EXPECT_TRUE(std::fabs(std::fabs(p->x) - 1.f) < 1e-5f);
+            EXPECT_TRUE(std::fabs(std::fabs(p->y) - 2.f) < 1e-5f);
+            EXPECT_TRUE(std::fabs(std::fabs(p->z) - 3.f) < 1e-5f);
+        }
+    }
+}
+
+TEST(PhysicsDebugDraw, SphereWireframeHas12EdgesAtRadius) {
+    ColliderComponent c;
+    c.shape = ColliderComponent::Shape::Sphere;
+    c.radius = 2.f;
+    const auto edges = collider_wireframe_edges(c, math::Mat4(1.f));
+    EXPECT_EQ(edges.size(), 12u);
+    for (const auto& [a, b] : edges) {
+        EXPECT_NEAR(glm::length(a), 2.f, 1e-4f);
+        EXPECT_NEAR(glm::length(b), 2.f, 1e-4f);
+    }
+}
+
+TEST(PhysicsDebugDraw, CapsuleWireframeHas24Edges) {
+    ColliderComponent c;
+    c.shape = ColliderComponent::Shape::Capsule;
+    c.radius = 0.5f;
+    c.height = 2.f;
+    const auto edges = collider_wireframe_edges(c, math::Mat4(1.f));
+    EXPECT_EQ(edges.size(), 24u);
+}
+
+TEST(PhysicsDebugDraw, WorldMatrixTransformsEdges) {
+    ColliderComponent c;
+    c.shape = ColliderComponent::Shape::Box;
+    c.half_extents = {1.f, 1.f, 1.f};
+    const math::Mat4 world = glm::translate(math::Mat4(1.f), math::Vec3(10.f, 5.f, -2.f));
+    const auto edges = collider_wireframe_edges(c, world);
+    EXPECT_EQ(edges.size(), 12u);
+    for (const auto& [a, b] : edges) {
+        for (const math::Vec3* p : {&a, &b}) {
+            // every corner sits within half-extent 1 of the translated center
+            EXPECT_TRUE(std::fabs(p->x - 10.f) <= 1.f + 1e-4f);
+            EXPECT_TRUE(std::fabs(p->y - 5.f) <= 1.f + 1e-4f);
+            EXPECT_TRUE(std::fabs(p->z + 2.f) <= 1.f + 1e-4f);
+        }
+    }
+    // and the translated center is actually reached (corner at +x,+y,+z)
+    bool found_corner = false;
+    for (const auto& [a, b] : edges)
+        for (const math::Vec3* p : {&a, &b})
+            if (std::fabs(p->x - 11.f) < 1e-4f && std::fabs(p->y - 6.f) < 1e-4f &&
+                std::fabs(p->z + 1.f) < 1e-4f)
+                found_corner = true;
+    EXPECT_TRUE(found_corner);
+}
+
+TEST(PhysicsDebugDraw, AabbEdges) {
+    const auto edges = aabb_edges(math::Vec3(1.f, 2.f, 3.f), math::Vec3(0.5f, 0.5f, 0.5f));
+    EXPECT_EQ(edges.size(), 12u);
+    // corners span center +/- half
+    f32 min_x = 1e30f, max_x = -1e30f;
+    for (const auto& [a, b] : edges) {
+        min_x = std::min({min_x, a.x, b.x});
+        max_x = std::max({max_x, a.x, b.x});
+    }
+    EXPECT_NEAR(min_x, 0.5f, 1e-5f);
+    EXPECT_NEAR(max_x, 1.5f, 1e-5f);
 }

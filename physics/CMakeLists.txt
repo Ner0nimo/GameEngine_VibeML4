@@ -1,5 +1,6 @@
 add_library(ignis_physics STATIC
     src/physics_world.cpp
+    src/debug_draw.cpp
 )
 add_library(ignis::physics ALIAS ignis_physics)
 
