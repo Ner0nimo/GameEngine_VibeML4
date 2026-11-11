@@ -81,7 +81,10 @@ void main() {
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break; // off-screen
         float diff = rayDiff(p, uv);
         // i > 0: the first sample sits on the source surface itself (self-crossing).
-        if (i > 0 && prevDiff > 0.0 && diff <= 0.0) {
+        // Hit on a sign change (in-front -> behind) OR when a sample lands within
+        // the thickness band of the surface (robust for thick occluders at coarse
+        // step sizes; thin-geometry tunneling is a known Hi-Z follow-up).
+        if (i > 0 && (abs(diff) < THICKNESS || (prevDiff > 0.0 && diff <= 0.0))) {
             float lo = prevT, hi = tt;
             vec2 huv = uv;
             for (int r = 0; r < 6; ++r) {
