@@ -393,22 +393,18 @@ TEST(Render, SSRReflectsScene) {
         scene.world().emplace<MeshRendererComponent>(ground).model_path = "assets/cube.gltf";
         // A big wall filling the upper frame: ground reflection rays are
         // guaranteed to hit it, so SSR must produce confident hits.
-        EntityId cube = scene.world().create_entity("wall");
-        auto& ct = scene.world().emplace<TransformComponent>(cube);
-        ct.position = {0.f, 9.f, -8.f};
-        ct.scale = {40.f, 20.f, 1.f};
-        scene.world().emplace<MeshRendererComponent>(cube).model_path = "assets/cube.gltf";
+        EntityId wall = scene.world().create_entity("wall");
+        auto& ct = scene.world().emplace<TransformComponent>(wall);
+        ct.position = {0.f, 4.5f, -4.f};
+        ct.scale = {60.f, 11.f, 1.f}; // fills the upper frame
+        scene.world().emplace<MeshRendererComponent>(wall).model_path = "assets/cube.gltf";
         EntityId sun = scene.world().create_entity("sun");
         auto& dl = scene.world().emplace<DirectionalLightComponent>(sun);
         dl.direction = {0.f, -1.f, -0.5f};
         dl.intensity = 3.f;
         Camera camera;
-        camera.position = {0.f, 5.f, 3.f};
+        camera.position = {0.f, 0.5f, 3.f}; // level: ground lower third, wall above
         camera.fov_y_deg = 60.f;
-        // Look steeply down so the cube's ground reflection lands in-frame.
-        const math::Mat4 lv = math::look_at(camera.position, math::Vec3(0.f, -1.f, -3.f),
-                                            math::Vec3(0.f, 1.f, 0.f));
-        camera.rotation = glm::quat_cast(glm::transpose(glm::mat3(lv)));
         VulkanRenderer renderer;
         if (!renderer.init_offscreen(64, 64).ok()) return std::vector<u8>{};
         renderer.set_ssr(ssr, 2.0f);
@@ -441,11 +437,6 @@ TEST(Render, SSRReflectsScene) {
                  static_cast<unsigned long long>(upperOn), static_cast<unsigned long long>(upperOff));
     const i64 lowerDiff = static_cast<i64>(withSSR) - static_cast<i64>(without);
     EXPECT_GT(std::abs(lowerDiff), 300) << "SSR must change the ground via wall reflections";
-    auto px = [](const std::vector<u8>& p, u32 x, u32 y) {
-        const size_t i = (static_cast<size_t>(y) * 64u + x) * 4u;
-        std::fprintf(stderr, "px(%u,%u)=(%u,%u,%u)\n", x, y, p[i], p[i + 1], p[i + 2]);
-    };
-    px(on, 32, 40); px(on, 32, 48); px(on, 32, 56);
     // The upper half (sky + cube) should be roughly unchanged: reflections land on the ground.
     const i64 upperDiff = static_cast<i64>(upperOn) - static_cast<i64>(upperOff);
     EXPECT_LT(std::abs(upperDiff), 2000);
