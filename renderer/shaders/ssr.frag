@@ -100,7 +100,7 @@ void main() {
         prevT = tt;
         prevDiff = diff;
     }
-    if (hitT < 0.0) { rt_ssr = vec4(0.0); return; }
+    if (hitT < 0.0) { rt_ssr = vec4(0.0, 0.0, 0.0, 0.0); return; } // DEBUG miss: alpha 0
 
     // Confidence: screen-edge fade, ray-length fade, grazing-angle fade.
     float edge = smoothstep(0.0, 0.05, min(min(hitUV.x, 1.0 - hitUV.x), min(hitUV.y, 1.0 - hitUV.y)));
@@ -108,5 +108,5 @@ void main() {
     float confidence = edge * rayFade * NdotV * ubo.params.y; // y = strength
 
     vec3 refl = texture(sampler2D(tex_hdr_prev, samp_hdr_prev), hitUV).rgb;
-    rt_ssr = vec4(refl, confidence);
+    rt_ssr = vec4(0.0, 0.0, 0.0, 1.0); // DEBUG hit: alpha 1
 }

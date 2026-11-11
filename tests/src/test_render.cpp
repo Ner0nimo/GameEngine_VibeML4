@@ -432,7 +432,13 @@ TEST(Render, SSRReflectsScene) {
     // Compare the whole frame: the readback is y-flipped (Vulkan viewport), so
     // don't assume which half holds the reflective ground.
     const i64 diff = static_cast<i64>(withSSR) - static_cast<i64>(without);
+    EXPECT_TRUE(false) << "force-print"; // DEBUG
     EXPECT_GT(std::abs(diff), 300) << "SSR must change the frame via wall/ground reflections";
+    auto px = [](const std::vector<u8>& p, u32 x, u32 y) {
+        const size_t i = (static_cast<size_t>(y) * 64u + x) * 4u;
+        std::fprintf(stderr, "px(%u,%u)=(%u,%u,%u)\n", x, y, p[i], p[i + 1], p[i + 2]);
+    };
+    px(on, 32, 8); px(on, 32, 16); px(on, 32, 24); px(on, 32, 40); px(on, 32, 56);
 }
 
 TEST(Render, DebugLinesDrawn) {
