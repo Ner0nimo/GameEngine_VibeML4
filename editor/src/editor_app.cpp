@@ -25,6 +25,7 @@
 #include <imgui_impl_vulkan.h>
 
 #include "ignis/ecs/component_registry.h"
+#include "ignis/ecs/subtree.h"
 #include "ignis/physics/debug_draw.h"
 
 #include <sys/wait.h>
@@ -803,6 +804,8 @@ void EditorApp::handle_shortcuts() {
     if (ImGui::IsKeyPressed(ImGuiKey_R, false)) gizmo_op_ = GizmoOp::Scale;
     if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && has_sel) delete_selected();
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false) && has_sel) duplicate_selected();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false) && has_sel) copy_selection_to_clipboard();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) paste_clipboard_entities();
     if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
         if (io.KeyShift) frame_scene();
         else if (has_sel) frame_selected();
@@ -845,6 +848,8 @@ void EditorApp::new_scene() {
     empty["prefabs"] = nlohmann::json::object();
     if (auto r = scene_->load_json(empty); r.ok()) {
         clear_selection();
+        prefab_save_target_ = NULL_ENTITY; // no stale modal across scene loads
+        rename_target_ = NULL_ENTITY;
         history_->clear();
         scene_path_ = "scenes/untitled.scene.json"; // where Ctrl+S will write
         update_window_title();
@@ -858,6 +863,8 @@ void EditorApp::open_scene(const std::string& path) {
     stop_play();
     if (auto r = scene_->load_file(path); r.ok()) {
         clear_selection();
+        prefab_save_target_ = NULL_ENTITY; // no stale modal across scene loads
+        rename_target_ = NULL_ENTITY;
         history_->clear();
         scene_path_ = path;
         update_window_title();
@@ -871,6 +878,8 @@ void EditorApp::reload_scene() {
     stop_play();
     if (auto r = scene_->load_file(scene_path_); r.ok()) {
         clear_selection();
+        prefab_save_target_ = NULL_ENTITY; // no stale modal across scene loads
+        rename_target_ = NULL_ENTITY;
         history_->clear();
         IGNIS_INFO("scene reloaded from {}", scene_path_);
     } else {
@@ -1122,53 +1131,173 @@ void EditorApp::delete_selected() {
     IGNIS_INFO("deleted {} entities", targets.size());
 }
 
+// Deep duplicate: the whole subtree (children included) via the engine's
+// serialize_subtree/spawn_subtree, so entity references are remapped to the
+// new ids. One undo transaction per call.
 void EditorApp::duplicate_entity(EntityId e) {
     if (!scene_->world().alive(e)) return;
     World& w = scene_->world();
-    history_->begin("duplicate '" + w.name_of(e) + "'");
-    EntityId copy = w.create_entity(w.name_of(e) + " copy");
-    w.set_parent(copy, w.parent_of(e));
-    if (const auto* t = w.get<TransformComponent>(e)) {
-        auto& ct = *w.emplace<TransformComponent>(copy);
-        ct = *t;
-        ct.position.x += 1.f;
+    history_->begin("duplicate '" + w.name_of(e) + "' (deep)");
+    const nlohmann::json j = serialize_subtree(w, e);
+    const EntityId copy = spawn_subtree(w, j, w.parent_of(e));
+    if (copy != NULL_ENTITY) {
+        w.set_name(copy, w.name_of(e) + " copy");
+        if (auto* tc = w.get<TransformComponent>(copy)) tc->position.x += 1.f;
+        select_replace(copy);
     }
-    for (const auto& [type, storage] : w.storages()) {
-        if (!storage->has(e)) continue;
-        if (const ComponentTypeInfo* info = w.registry().find_by_type(type))
-            info->copy(w, e, copy);
-    }
-    select_replace(copy);
     history_->commit();
 }
 
-// Duplicating several entities is one undo transaction; the copies join the
-// selection.
+// Duplicating the selection is one undo transaction; copies join the
+// selection. Only selection roots are duplicated (children of selected
+// entities come along inside their parent's subtree).
 void EditorApp::duplicate_selected() {
     if (selection_.empty()) return;
     // One semantic for 1..N selected: the copies JOIN the selection and the
     // last copy becomes primary (no special-casing of the single case).
-    const std::vector<EntityId> targets = selection_;
-    history_->begin("duplicate " + std::to_string(targets.size()) + " entities");
+    // Only selection roots are duplicated (children of selected entities come
+    // along inside their parent's subtree); deep via serialize/spawn_subtree.
+    const std::vector<EntityId> roots = selection_roots();
+    if (roots.empty()) return;
     World& w = scene_->world();
-    for (EntityId e : targets) {
+    history_->begin("duplicate " + std::to_string(roots.size()) + " entities (deep)");
+    for (EntityId e : roots) {
         if (!w.alive(e)) continue;
-        EntityId copy = w.create_entity(w.name_of(e) + " copy");
-        w.set_parent(copy, w.parent_of(e));
-        if (const auto* t = w.get<TransformComponent>(e)) {
-            auto& ct = *w.emplace<TransformComponent>(copy);
-            ct = *t;
-            ct.position.x += 1.f;
-        }
-        for (const auto& [type, storage] : w.storages()) {
-            if (!storage->has(e)) continue;
-            if (const ComponentTypeInfo* info = w.registry().find_by_type(type))
-                info->copy(w, e, copy);
-        }
+        const nlohmann::json j = serialize_subtree(w, e);
+        const EntityId copy = spawn_subtree(w, j, w.parent_of(e));
+        if (copy == NULL_ENTITY) continue;
+        w.set_name(copy, w.name_of(e) + " copy");
+        if (auto* tc = w.get<TransformComponent>(copy)) tc->position.x += 1.f;
         selection_.push_back(copy);
     }
-    selected_ = selection_.back();
+    if (!selection_.empty()) selected_ = selection_.back();
     history_->commit();
+}
+
+// --- clipboard + prefab save (issue #12) --------------------------------------
+
+std::vector<EntityId> EditorApp::selection_roots() const {
+    std::vector<EntityId> out;
+    World& w = scene_->world();
+    for (EntityId e : selection_) {
+        const EntityId p = w.parent_of(e);
+        const bool parent_selected =
+            p != NULL_ENTITY && std::find(selection_.begin(), selection_.end(), p) != selection_.end();
+        if (!parent_selected) out.push_back(e);
+    }
+    return out;
+}
+
+void EditorApp::copy_selection_to_clipboard() {
+    const std::vector<EntityId> roots = selection_roots();
+    if (roots.empty()) {
+        IGNIS_WARN("nothing selected to copy");
+        return;
+    }
+    World& w = scene_->world();
+    nlohmann::json j;
+    j["ignis_clipboard"] = "entities";
+    j["entities"] = nlohmann::json::array();
+    for (EntityId e : roots) j["entities"].push_back(serialize_subtree(w, e));
+    ImGui::SetClipboardText(j.dump().c_str());
+    IGNIS_INFO("copied {} entit{} to clipboard", roots.size(), roots.size() == 1 ? "y" : "ies");
+}
+
+void EditorApp::paste_clipboard_entities() {
+    const char* text = ImGui::GetClipboardText();
+    if (!text || text[0] == '\0') {
+        IGNIS_WARN("clipboard is empty");
+        return;
+    }
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(text);
+    } catch (const std::exception& e) {
+        IGNIS_WARN("clipboard is not JSON: {}", e.what());
+        return;
+    }
+    if (!j.contains("ignis_clipboard") || j["ignis_clipboard"] != "entities" ||
+        !j.contains("entities") || !j["entities"].is_array() || j["entities"].empty()) {
+        IGNIS_WARN("clipboard does not hold Ignis entities");
+        return;
+    }
+    World& w = scene_->world();
+    history_->begin("paste " + std::to_string(j["entities"].size()) + " entities");
+    std::vector<EntityId> pasted;
+    for (const auto& sub : j["entities"]) {
+        const EntityId e = spawn_subtree(w, sub, NULL_ENTITY); // root level
+        if (e == NULL_ENTITY) continue;
+        if (auto* tc = w.get<TransformComponent>(e)) tc->position.x += 1.f;
+        pasted.push_back(e);
+    }
+    history_->commit();
+    if (!pasted.empty()) {
+        selection_ = pasted;
+        selected_ = pasted.back();
+        IGNIS_INFO("pasted {} entit{}", pasted.size(), pasted.size() == 1 ? "y" : "ies");
+    }
+}
+
+void EditorApp::copy_component(const ComponentTypeInfo* info) {
+    if (selected_ == NULL_ENTITY || !scene_->world().alive(selected_)) return;
+    nlohmann::json j;
+    j["ignis_component"] = info->name;
+    j["data"] = info->serialize(scene_->world(), selected_);
+    ImGui::SetClipboardText(j.dump().c_str());
+    IGNIS_INFO("copied component '{}'", info->name);
+}
+
+void EditorApp::paste_component(const ComponentTypeInfo* info) {
+    if (selected_ == NULL_ENTITY || !scene_->world().alive(selected_)) return;
+    const char* text = ImGui::GetClipboardText();
+    if (!text) return;
+    try {
+        const nlohmann::json j = nlohmann::json::parse(text);
+        if (!j.contains("ignis_component") || j["ignis_component"] != info->name ||
+            !j.contains("data")) {
+            IGNIS_WARN("clipboard does not hold a '{}' component", info->name);
+            return;
+        }
+        history_->begin("paste " + info->name);
+        if (!info->deserialize(scene_->world(), selected_, j["data"]))
+            IGNIS_WARN("bad component data for '{}'", info->name);
+        history_->commit();
+        IGNIS_INFO("pasted component '{}'", info->name);
+    } catch (const std::exception& e) {
+        IGNIS_ERROR("bad clipboard JSON: {}", e.what());
+    }
+}
+
+void EditorApp::reset_component(const ComponentTypeInfo* info) {
+    if (selected_ == NULL_ENTITY || !scene_->world().alive(selected_)) return;
+    history_->begin("reset " + info->name);
+    info->add_default(scene_->world(), selected_); // emplace overwrites
+    history_->commit();
+    IGNIS_INFO("reset component '{}' to defaults", info->name);
+}
+
+void EditorApp::draw_prefab_modal() {
+    if (prefab_save_target_ == NULL_ENTITY || !scene_->world().alive(prefab_save_target_)) return;
+    ImGui::OpenPopup("Save as prefab");
+    if (ImGui::BeginPopupModal("Save as prefab", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("prefab name", prefab_name_buf_, sizeof(prefab_name_buf_));
+        if (ImGui::Button("Save")) {
+            const std::string name = prefab_name_buf_;
+            if (!name.empty()) {
+                World& w = scene_->world();
+                scene_->add_prefab(name, serialize_subtree(w, prefab_save_target_));
+                IGNIS_INFO("saved prefab '{}' (appears under GameObject > Prefab)", name);
+            }
+            prefab_save_target_ = NULL_ENTITY;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            prefab_save_target_ = NULL_ENTITY;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 }
 
 void EditorApp::undo() {
@@ -1241,7 +1370,11 @@ void EditorApp::draw_menu_bar() {
         if (ImGui::MenuItem("Delete selected", "Del", false, has_sel)) delete_selected();
         item_tooltip("delete all selected entities as one undoable action");
         if (ImGui::MenuItem("Duplicate selected", "Ctrl+D", false, has_sel)) duplicate_selected();
-        item_tooltip("copy all selected entities (offset by +1 on X) as one undoable action");
+        item_tooltip("deep-copy all selected entities (children included, +1 on X), one undo step");
+        if (ImGui::MenuItem("Copy", "Ctrl+C", false, has_sel)) copy_selection_to_clipboard();
+        item_tooltip("copy the selected entities (deep, as JSON) to the clipboard");
+        if (ImGui::MenuItem("Paste", "Ctrl+V")) paste_clipboard_entities();
+        item_tooltip("paste entities from the clipboard at root level (+1 on X), one undo step");
         if (ImGui::MenuItem("Frame selected", "F", false, has_sel)) frame_selected();
         item_tooltip("move the camera to look at the selected entity");
         if (ImGui::MenuItem("Frame scene", "Shift+F")) frame_scene();
@@ -1365,7 +1498,7 @@ void EditorApp::draw_help_window() {
         ImGui::Text("Viewport: RMB drag = look, WASDQE = fly, wheel = dolly, LMB = select entity");
         ImGui::Text("          F = frame selected, Shift+F = frame scene, nav gizmo (top-right) snaps view");
         ImGui::Text("Gizmo:    W translate, E rotate, R scale; toolbar = space + snap");
-        ImGui::Text("Edit:     Del delete, Ctrl+D duplicate, F frame selected");
+        ImGui::Text("Edit:     Del delete, Ctrl+D duplicate (deep), Ctrl+C/V copy/paste, F frame selected");
         ImGui::Text("History:  Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo");
         ImGui::Text("File:     Ctrl+N new scene, Ctrl+S save, Esc quit");
         ImGui::Text("Run:      P play/pause; Stop restores the pre-play scene state");
@@ -1552,8 +1685,13 @@ void EditorApp::draw_hierarchy_node(EntityId e) {
             std::snprintf(rename_buf_, sizeof(rename_buf_), "%s", w.name_of(e).c_str());
         }
         item_tooltip("rename this entity");
-        if (ImGui::MenuItem("Duplicate")) duplicate_entity(e);
-        item_tooltip("create a copy of this entity (offset by +1 on X)");
+        if (ImGui::MenuItem("Duplicate (deep)")) duplicate_entity(e);
+        item_tooltip("copy this entity and its whole subtree (+1 on X), one undo step");
+        if (ImGui::MenuItem("Save as prefab...")) {
+            prefab_save_target_ = e;
+            std::snprintf(prefab_name_buf_, sizeof(prefab_name_buf_), "%s", w.name_of(e).c_str());
+        }
+        item_tooltip("save this entity's subtree as a named prefab (GameObject > Prefab)");
         if (ImGui::MenuItem("Delete")) delete_entity(e);
         item_tooltip("delete this entity and its children");
         ImGui::EndPopup();
@@ -1674,6 +1812,16 @@ void EditorApp::draw_inspector() {
         if (!info) continue;
         ImGui::PushID(info->name.c_str());
         const bool open = ImGui::CollapsingHeader(info->name.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+        ImGui::SameLine(ImGui::GetWindowWidth() - 62.f);
+        if (ImGui::SmallButton("...")) ImGui::OpenPopup("comp_ops");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("component actions: copy / paste / reset to default");
+        if (ImGui::BeginPopup("comp_ops")) {
+            if (ImGui::MenuItem("Copy component")) copy_component(info);
+            if (ImGui::MenuItem("Paste component")) paste_component(info);
+            if (ImGui::MenuItem("Reset to default")) reset_component(info);
+            ImGui::EndPopup();
+        }
         ImGui::SameLine(ImGui::GetWindowWidth() - 30.f);
         if (ImGui::SmallButton("x")) {
             history_->begin("remove " + info->name);
@@ -2267,6 +2415,7 @@ void EditorApp::main_loop() {
         if (show_bottom_) draw_bottom_panel(dt);
         if (show_statusbar_) draw_status_bar(dt);
         draw_save_as_modal();
+        draw_prefab_modal();
         draw_help_window();
         const f32 aspect = fb.height > 0 ? static_cast<f32>(fb.width) / static_cast<f32>(fb.height) : 1.f;
         draw_viewport_gizmo(camera, aspect);
