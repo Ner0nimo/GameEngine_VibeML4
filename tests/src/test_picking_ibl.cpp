@@ -209,3 +209,67 @@ TEST(Ibl, BrdfLutShapeAndRange) {
                           static_cast<size_t>(size - 1)) * 2u; // (u=1-ish, v=1-ish)
     EXPECT_GT(lut[rough + 1], lut[corner + 1]);
 }
+
+// --- marquee selection helpers (issue #11) -------------------------------------
+
+TEST(Picking, WorldToScreenCenter) {
+    Camera cam; // identity at origin, looking down -Z
+    const auto px = picking::world_to_screen(cam, 1.f, 100.f, 100.f, math::Vec3(0.f, 0.f, -5.f));
+    ASSERT_TRUE(px.has_value());
+    EXPECT_NEAR(px->x, 50.f, 0.5f);
+    EXPECT_NEAR(px->y, 50.f, 0.5f);
+}
+
+TEST(Picking, WorldToScreenBehindCameraIsNullopt) {
+    Camera cam;
+    EXPECT_FALSE(picking::world_to_screen(cam, 1.f, 100.f, 100.f, math::Vec3(0.f, 0.f, 5.f)).has_value());
+}
+
+TEST(Picking, WorldToScreenRoundTripWithRay) {
+    Camera cam;
+    cam.position = {1.f, 2.f, 3.f};
+    cam.rotation = glm::angleAxis(0.3f, math::Vec3(0.f, 1.f, 0.f));
+    const math::Vec3 p(1.f, 0.5f, -4.f);
+    const auto px = picking::world_to_screen(cam, 16.f / 9.f, 1280.f, 720.f, p);
+    ASSERT_TRUE(px.has_value());
+    // Convert the pixel back to the NDC the editor feeds into screen_ray and
+    // check the ray actually passes through the point's neighborhood.
+    const f32 ndc_x = px->x / 1280.f * 2.f - 1.f;
+    const f32 ndc_y = -(px->y / 720.f * 2.f - 1.f);
+    const picking::Ray ray = picking::screen_ray(cam, 16.f / 9.f, ndc_x, ndc_y);
+    const auto t = picking::ray_aabb(ray.origin, ray.dir, p, math::Vec3(0.01f));
+    EXPECT_TRUE(t.has_value());
+}
+
+TEST(Picking, ProjectAabbCenterAndBehind) {
+    Camera cam;
+    const auto r = picking::project_aabb(cam, 1.f, 100.f, 100.f, math::Vec3(0.f, 0.f, -5.f),
+                                         math::Vec3(1.f));
+    EXPECT_TRUE(r.valid);
+    EXPECT_LT(r.min_x, 50.f);
+    EXPECT_GT(r.max_x, 50.f);
+    EXPECT_LT(r.min_y, 50.f);
+    EXPECT_GT(r.max_y, 50.f);
+    // Box behind the camera -> invalid rect.
+    const auto behind = picking::project_aabb(cam, 1.f, 100.f, 100.f, math::Vec3(0.f, 0.f, 5.f),
+                                              math::Vec3(1.f));
+    EXPECT_FALSE(behind.valid);
+}
+
+TEST(Picking, ProjectAabbOffToTheSide) {
+    Camera cam;
+    const auto r = picking::project_aabb(cam, 1.f, 100.f, 100.f, math::Vec3(3.f, 0.f, -5.f),
+                                         math::Vec3(0.5f));
+    EXPECT_TRUE(r.valid);
+    EXPECT_GT(r.min_x, 50.f); // entirely right of center
+}
+
+TEST(Picking, RectsIntersect) {
+    const picking::ScreenRect a{10.f, 10.f, 50.f, 50.f, true};
+    const picking::ScreenRect b{40.f, 40.f, 80.f, 80.f, true};
+    const picking::ScreenRect c{60.f, 60.f, 90.f, 90.f, true};
+    const picking::ScreenRect invalid{0.f, 0.f, 0.f, 0.f, false};
+    EXPECT_TRUE(picking::rects_intersect(a, b));
+    EXPECT_FALSE(picking::rects_intersect(a, c));
+    EXPECT_FALSE(picking::rects_intersect(a, invalid));
+}

@@ -68,4 +68,44 @@ std::optional<f32> ray_aabb(const math::Vec3& origin, const math::Vec3& dir,
     return tmin;
 }
 
+std::optional<math::Vec2> world_to_screen(const Camera& cam, f32 aspect, f32 width, f32 height,
+                                          const math::Vec3& world) {
+    const math::Mat4 vp = cam.projection_matrix(aspect) * cam.view_matrix();
+    const math::Vec4 clip = vp * math::Vec4(world, 1.f);
+    if (clip.w <= 0.f) return std::nullopt; // behind the camera
+    const f32 ndc_x = clip.x / clip.w;
+    const f32 ndc_y = clip.y / clip.w;
+    return math::Vec2((ndc_x + 1.f) * 0.5f * width, (1.f - (ndc_y + 1.f) * 0.5f) * height);
+}
+
+ScreenRect project_aabb(const Camera& cam, f32 aspect, f32 width, f32 height,
+                        const math::Vec3& center, const math::Vec3& half_extents) {
+    const math::Mat4 vp = cam.projection_matrix(aspect) * cam.view_matrix();
+    ScreenRect r;
+    r.min_x = r.min_y = std::numeric_limits<f32>::max();
+    r.max_x = r.max_y = std::numeric_limits<f32>::lowest();
+    for (int i = 0; i < 8; ++i) {
+        const math::Vec3 corner(center.x + (i & 1 ? half_extents.x : -half_extents.x),
+                                center.y + (i & 2 ? half_extents.y : -half_extents.y),
+                                center.z + (i & 4 ? half_extents.z : -half_extents.z));
+        const math::Vec4 clip = vp * math::Vec4(corner, 1.f);
+        if (clip.w <= 0.f) continue; // corner behind the camera
+        const f32 ndc_x = clip.x / clip.w;
+        const f32 ndc_y = clip.y / clip.w;
+        const f32 px = (ndc_x + 1.f) * 0.5f * width;
+        const f32 py = (1.f - (ndc_y + 1.f) * 0.5f) * height;
+        r.min_x = glm::min(r.min_x, px);
+        r.max_x = glm::max(r.max_x, px);
+        r.min_y = glm::min(r.min_y, py);
+        r.max_y = glm::max(r.max_y, py);
+        r.valid = true;
+    }
+    return r;
+}
+
+bool rects_intersect(const ScreenRect& a, const ScreenRect& b) {
+    if (!a.valid || !b.valid) return false;
+    return a.min_x <= b.max_x && a.max_x >= b.min_x && a.min_y <= b.max_y && a.max_y >= b.min_y;
+}
+
 } // namespace ignis::picking
