@@ -16,11 +16,13 @@ class World;
 nlohmann::json serialize_subtree(const World& w, EntityId root);
 
 // Spawn a subtree from JSON produced by serialize_subtree (or a prefab
-// template with "children"). Two phases: create all entities with fresh ids
-// while recording an old->new id map, then deserialize components (remapping
-// any integer component field named "entity" through the map) and link the
-// hierarchy. `parent` = NULL_ENTITY spawns at root. Returns the new root id,
-// or NULL_ENTITY on malformed input (the world is left unchanged).
+// template with "children"). The whole tree is structurally validated first,
+// so malformed input returns NULL_ENTITY with the world unchanged. Two
+// phases: create all entities with fresh ids while recording an old->new id
+// map, then deserialize components (remapping any integer component field
+// named "entity" through the map) and link the hierarchy; unknown components
+// or bad component data are skipped with a warning. `parent` = NULL_ENTITY
+// spawns at root. Returns the new root id.
 EntityId spawn_subtree(World& w, const nlohmann::json& j, EntityId parent = NULL_ENTITY);
 
 // Recursively rewrite integer fields named "entity" in component JSON through

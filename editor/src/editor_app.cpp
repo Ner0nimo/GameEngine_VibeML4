@@ -848,6 +848,8 @@ void EditorApp::new_scene() {
     empty["prefabs"] = nlohmann::json::object();
     if (auto r = scene_->load_json(empty); r.ok()) {
         clear_selection();
+        prefab_save_target_ = NULL_ENTITY; // no stale modal across scene loads
+        rename_target_ = NULL_ENTITY;
         history_->clear();
         scene_path_ = "scenes/untitled.scene.json"; // where Ctrl+S will write
         update_window_title();
@@ -861,6 +863,8 @@ void EditorApp::open_scene(const std::string& path) {
     stop_play();
     if (auto r = scene_->load_file(path); r.ok()) {
         clear_selection();
+        prefab_save_target_ = NULL_ENTITY; // no stale modal across scene loads
+        rename_target_ = NULL_ENTITY;
         history_->clear();
         scene_path_ = path;
         update_window_title();
@@ -874,6 +878,8 @@ void EditorApp::reload_scene() {
     stop_play();
     if (auto r = scene_->load_file(scene_path_); r.ok()) {
         clear_selection();
+        prefab_save_target_ = NULL_ENTITY; // no stale modal across scene loads
+        rename_target_ = NULL_ENTITY;
         history_->clear();
         IGNIS_INFO("scene reloaded from {}", scene_path_);
     } else {

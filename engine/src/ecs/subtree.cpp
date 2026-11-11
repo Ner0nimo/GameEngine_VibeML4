@@ -26,6 +26,20 @@ nlohmann::json serialize_entity(const World& w, EntityId e) {
     return j;
 }
 
+// Structural validity of a subtree node: an object with a string "name",
+// and recursively valid "children". Validated up front in spawn_subtree so a
+// malformed tree never leaves orphaned entities behind.
+bool valid_subtree_node(const nlohmann::json& n) {
+    if (!n.is_object()) return false;
+    if (!n.contains("name") || !n["name"].is_string()) return false;
+    if (n.contains("children")) {
+        if (!n["children"].is_array()) return false;
+        for (const auto& c : n["children"])
+            if (!valid_subtree_node(c)) return false;
+    }
+    return true;
+}
+
 } // namespace
 
 nlohmann::json serialize_subtree(const World& w, EntityId root) {
@@ -50,7 +64,9 @@ void remap_entity_refs(nlohmann::json& j, const std::unordered_map<EntityId, Ent
 }
 
 EntityId spawn_subtree(World& w, const nlohmann::json& j, EntityId parent) {
-    if (!j.is_object() || !j.contains("name")) return NULL_ENTITY;
+    // Validate the whole tree BEFORE creating anything, so malformed input
+    // really does leave the world unchanged (no orphaned entities).
+    if (!valid_subtree_node(j)) return NULL_ENTITY;
     if (parent != NULL_ENTITY && !w.alive(parent)) return NULL_ENTITY;
 
     // Phase 1: create every entity with a fresh id. Nodes are keyed by pointer

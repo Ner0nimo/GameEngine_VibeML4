@@ -133,3 +133,26 @@ TEST(Subtree, PrefabWithChildrenSpawnsWholeSubtree) {
     // the spawned root has exactly one child (the copied "child")
     EXPECT_EQ(scene.world().children_of(spawned).size(), 1u);
 }
+
+TEST(Subtree, MalformedDeepChildLeavesWorldUntouched) {
+    Scene scene = make_subtree_scene();
+    const u64 before = scene.world().entity_count();
+    // Root is valid, but a nested child is not an object -> whole spawn fails
+    // up front, no orphaned entities.
+    nlohmann::json j;
+    j["name"] = "root";
+    j["children"] = nlohmann::json::array();
+    j["children"].push_back(42);                 // non-object child
+    j["children"].push_back(nlohmann::json::object()); // object without "name"
+    EXPECT_EQ(spawn_subtree(scene.world(), j), NULL_ENTITY);
+    EXPECT_EQ(scene.world().entity_count(), before);
+    // And a structurally valid tree still spawns fine.
+    nlohmann::json ok;
+    ok["name"] = "root";
+    nlohmann::json child;
+    child["name"] = "kid";
+    ok["children"] = nlohmann::json::array();
+    ok["children"].push_back(child);
+    EXPECT_NE(spawn_subtree(scene.world(), ok), NULL_ENTITY);
+    EXPECT_EQ(scene.world().entity_count(), before + 2);
+}
