@@ -56,7 +56,8 @@ private:
     std::unique_ptr<AudioSystem> audio_sys_;
     std::unique_ptr<CommandProcessor> commands_;
     std::unique_ptr<SceneHistory> history_; // undo/redo for scene mutations
-    EntityId selected_ = 0;
+    EntityId selected_ = 0;        // primary selection (drives inspector + gizmo)
+    std::vector<EntityId> selection_; // multi-selection; editor state, never serialized
     bool playing_ = false;
 
 #ifdef IGNIS_WITH_GRAPHICS
@@ -111,6 +112,11 @@ private:
     std::vector<f32> fps_history_; // ring buffer (capped) for the stats graph
     nlohmann::json play_snapshot_;  // scene state captured when play starts
     bool has_snapshot_ = false;
+    // viewport marquee (rubber-band selection) state, pixel coords
+    bool lmb_down_viewport_ = false;
+    math::Vec2 lmb_press_{0.f, 0.f};
+    bool marquee_active_ = false;
+    math::Vec2 marquee_end_{0.f, 0.f};
     // fly-camera input state
     f32 cam_yaw_ = 0.f, cam_pitch_ = 0.f;
     bool rmb_down_ = false;
@@ -206,6 +212,18 @@ private:
     void duplicate_entity(EntityId e);
     void undo();
     void redo();
+    // multi-selection (replace / add / toggle / remove / range in tree order)
+    void select_replace(EntityId e);
+    void select_add(EntityId e);
+    void select_toggle(EntityId e);
+    void select_remove(EntityId e);
+    void select_range(EntityId anchor, EntityId e, bool add);
+    void clear_selection();
+    void prune_selection();
+    std::vector<EntityId> tree_order() const;
+    void marquee_select(const picking::ScreenRect& rect, bool add, bool remove);
+    void delete_selected();
+    void duplicate_selected();
 #endif
 };
 

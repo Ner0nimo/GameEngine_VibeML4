@@ -80,6 +80,19 @@ namespace picking {
     // Ray vs. axis-aligned box (center, half extents); distance, or nullopt on miss.
     std::optional<f32> ray_aabb(const math::Vec3& origin, const math::Vec3& dir,
                                 const math::Vec3& center, const math::Vec3& half_extents);
+    // Pixel-space rectangle (top-left origin, y down — editor mouse coords).
+    struct ScreenRect {
+        f32 min_x = 0.f, min_y = 0.f, max_x = 0.f, max_y = 0.f;
+        bool valid = false; // false when nothing is in front of the camera
+    };
+    // World point -> pixel coords (top-left origin, y down); nullopt when behind the camera.
+    std::optional<math::Vec2> world_to_screen(const Camera& cam, f32 aspect, f32 width, f32 height,
+                                              const math::Vec3& world);
+    // Project all 8 corners of a world AABB into a pixel-space rect (input for
+    // marquee rectangle-intersection tests).
+    ScreenRect project_aabb(const Camera& cam, f32 aspect, f32 width, f32 height,
+                            const math::Vec3& center, const math::Vec3& half_extents);
+    bool rects_intersect(const ScreenRect& a, const ScreenRect& b);
 } // namespace picking
 
 } // namespace ignis

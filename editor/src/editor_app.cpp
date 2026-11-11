@@ -726,33 +726,70 @@ void EditorApp::handle_viewport_input(Camera& camera, EntityId cam_entity, f32 d
     }
     publish_view_camera(camera, cam_entity);
 
-    // Click to select (ray vs. mesh AABBs), unless the click went to the UI.
+    // Click / rubber-band marquee selection, unless the click went to the UI.
+    // LMB press records the start; a drag past ~5px becomes a marquee; release
+    // applies either the marquee (projected-AABB rect intersection) or a
+    // single ray pick. Modifiers: none = replace, Ctrl = toggle/add,
+    // Ctrl+Shift = remove.
     const bool lmb = glfwGetMouseButton(glfw, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
     if (lmb && !left_clicked_ && !io.WantCaptureMouse) {
-        const FramebufferSize fb = window_->framebuffer_size();
-        if (fb.width > 0 && fb.height > 0) {
-            const f32 ndcX = (static_cast<f32>(mx) / static_cast<f32>(fb.width)) * 2.f - 1.f;
-            const f32 ndcY = (static_cast<f32>(my) / static_cast<f32>(fb.height)) * 2.f - 1.f;
-            const picking::Ray ray = picking::screen_ray(
-                camera, static_cast<f32>(fb.width) / static_cast<f32>(fb.height), ndcX, -ndcY);
-            f32 bestT = 1e30f;
-            EntityId best = NULL_ENTITY;
-            for (EntityId e : scene_->world().all_entities()) {
-                if (!scene_->world().get<MeshRendererComponent>(e)) continue;
-                const auto* tc = scene_->world().get<TransformComponent>(e);
-                if (!tc) continue;
-                const math::Mat4 wm = world_matrix(scene_->world(), e);
-                const math::Vec3 center{static_cast<f32>(wm[3][0]), static_cast<f32>(wm[3][1]),
-                                        static_cast<f32>(wm[3][2])};
-                const math::Vec3 half = tc->scale * 0.5f;
-                const auto t = picking::ray_aabb(ray.origin, ray.dir, center, half);
-                if (t.has_value() && *t < bestT) {
-                    bestT = *t;
-                    best = e;
+        lmb_down_viewport_ = true;
+        lmb_press_ = {static_cast<f32>(mx), static_cast<f32>(my)};
+        marquee_active_ = false;
+        marquee_end_ = lmb_press_;
+    }
+    if (lmb && lmb_down_viewport_) {
+        marquee_end_ = {static_cast<f32>(mx), static_cast<f32>(my)};
+        const math::Vec2 d = marquee_end_ - lmb_press_;
+        if (glm::length(d) > 5.f) marquee_active_ = true;
+    }
+    if (!lmb && left_clicked_ && lmb_down_viewport_) {
+        const bool add = io.KeyCtrl && !io.KeyShift;
+        const bool remove = io.KeyCtrl && io.KeyShift;
+        if (marquee_active_) {
+            picking::ScreenRect rect;
+            rect.min_x = std::min(lmb_press_.x, marquee_end_.x);
+            rect.min_y = std::min(lmb_press_.y, marquee_end_.y);
+            rect.max_x = std::max(lmb_press_.x, marquee_end_.x);
+            rect.max_y = std::max(lmb_press_.y, marquee_end_.y);
+            rect.valid = true;
+            marquee_select(rect, add, remove);
+        } else {
+            const FramebufferSize fb = window_->framebuffer_size();
+            if (fb.width > 0 && fb.height > 0) {
+                const f32 ndcX = (static_cast<f32>(mx) / static_cast<f32>(fb.width)) * 2.f - 1.f;
+                const f32 ndcY = (static_cast<f32>(my) / static_cast<f32>(fb.height)) * 2.f - 1.f;
+                const picking::Ray ray = picking::screen_ray(
+                    camera, static_cast<f32>(fb.width) / static_cast<f32>(fb.height), ndcX, -ndcY);
+                f32 bestT = 1e30f;
+                EntityId best = NULL_ENTITY;
+                for (EntityId e : scene_->world().all_entities()) {
+                    if (!scene_->world().get<MeshRendererComponent>(e)) continue;
+                    const auto* tc = scene_->world().get<TransformComponent>(e);
+                    if (!tc) continue;
+                    const math::Mat4 wm = world_matrix(scene_->world(), e);
+                    const math::Vec3 center{static_cast<f32>(wm[3][0]), static_cast<f32>(wm[3][1]),
+                                            static_cast<f32>(wm[3][2])};
+                    const math::Vec3 half = tc->scale * 0.5f;
+                    const auto t = picking::ray_aabb(ray.origin, ray.dir, center, half);
+                    if (t.has_value() && *t < bestT) {
+                        bestT = *t;
+                        best = e;
+                    }
+                }
+                if (remove) {
+                    if (best != NULL_ENTITY) select_remove(best);
+                } else if (add) {
+                    if (best != NULL_ENTITY) select_toggle(best);
+                } else if (best != NULL_ENTITY) {
+                    select_replace(best);
+                } else {
+                    clear_selection(); // plain click on empty space clears
                 }
             }
-            if (best != NULL_ENTITY) selected_ = best;
         }
+        lmb_down_viewport_ = false;
+        marquee_active_ = false;
     }
     left_clicked_ = lmb;
 }
@@ -764,8 +801,8 @@ void EditorApp::handle_shortcuts() {
     if (ImGui::IsKeyPressed(ImGuiKey_W, false)) gizmo_op_ = GizmoOp::Translate;
     if (ImGui::IsKeyPressed(ImGuiKey_E, false)) gizmo_op_ = GizmoOp::Rotate;
     if (ImGui::IsKeyPressed(ImGuiKey_R, false)) gizmo_op_ = GizmoOp::Scale;
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && has_sel) delete_entity(selected_);
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false) && has_sel) duplicate_entity(selected_);
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && has_sel) delete_selected();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false) && has_sel) duplicate_selected();
     if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
         if (io.KeyShift) frame_scene();
         else if (has_sel) frame_selected();
@@ -807,7 +844,7 @@ void EditorApp::new_scene() {
     empty["entities"] = nlohmann::json::array();
     empty["prefabs"] = nlohmann::json::object();
     if (auto r = scene_->load_json(empty); r.ok()) {
-        selected_ = NULL_ENTITY;
+        clear_selection();
         history_->clear();
         scene_path_ = "scenes/untitled.scene.json"; // where Ctrl+S will write
         update_window_title();
@@ -820,7 +857,7 @@ void EditorApp::new_scene() {
 void EditorApp::open_scene(const std::string& path) {
     stop_play();
     if (auto r = scene_->load_file(path); r.ok()) {
-        selected_ = NULL_ENTITY;
+        clear_selection();
         history_->clear();
         scene_path_ = path;
         update_window_title();
@@ -833,6 +870,7 @@ void EditorApp::open_scene(const std::string& path) {
 void EditorApp::reload_scene() {
     stop_play();
     if (auto r = scene_->load_file(scene_path_); r.ok()) {
+        clear_selection();
         history_->clear();
         IGNIS_INFO("scene reloaded from {}", scene_path_);
     } else {
@@ -861,7 +899,7 @@ void EditorApp::stop_play() {
             IGNIS_ERROR("stop: restore failed: {}", r.error());
         has_snapshot_ = false;
     }
-    if (selected_ != NULL_ENTITY && !scene_->world().alive(selected_)) selected_ = NULL_ENTITY;
+    prune_selection();
 }
 
 EntityId EditorApp::create_gameobject(const std::string& kind) {
@@ -880,7 +918,7 @@ EntityId EditorApp::create_gameobject(const std::string& kind) {
     } else if (kind == "Audio Source") {
         w.emplace<AudioSourceComponent>(e);
     }
-    selected_ = e;
+    select_replace(e);
     history_->commit();
     IGNIS_INFO("created '{}' (#%llu)", kind, static_cast<unsigned long long>(e));
     return e;
@@ -948,14 +986,140 @@ void EditorApp::frame_scene() {
                find_active_camera());
 }
 
+// --- multi-selection (editor state; never serialized into the scene) ---------
+// selected_ is always the primary = the entity the inspector/gizmo act on.
+
+void EditorApp::select_replace(EntityId e) {
+    selection_.clear();
+    selection_.push_back(e);
+    selected_ = e;
+}
+
+void EditorApp::select_add(EntityId e) {
+    if (std::find(selection_.begin(), selection_.end(), e) == selection_.end())
+        selection_.push_back(e);
+    selected_ = e;
+}
+
+void EditorApp::select_toggle(EntityId e) {
+    const auto it = std::find(selection_.begin(), selection_.end(), e);
+    if (it != selection_.end()) {
+        selection_.erase(it);
+        selected_ = selection_.empty() ? NULL_ENTITY : selection_.back();
+    } else {
+        selection_.push_back(e);
+        selected_ = e;
+    }
+}
+
+void EditorApp::select_remove(EntityId e) {
+    const auto it = std::find(selection_.begin(), selection_.end(), e);
+    if (it != selection_.end()) selection_.erase(it);
+    if (selected_ == e) selected_ = selection_.empty() ? NULL_ENTITY : selection_.back();
+}
+
+void EditorApp::clear_selection() {
+    selection_.clear();
+    selected_ = NULL_ENTITY;
+}
+
+void EditorApp::prune_selection() {
+    std::erase_if(selection_, [this](EntityId e) { return !scene_->world().alive(e); });
+    if (selected_ != NULL_ENTITY && !scene_->world().alive(selected_))
+        selected_ = selection_.empty() ? NULL_ENTITY : selection_.back();
+}
+
+// Entities in the exact order the hierarchy tree draws them (roots sorted,
+// children in hierarchy order) — used for Shift+click range selection.
+std::vector<EntityId> EditorApp::tree_order() const {
+    std::vector<EntityId> out;
+    std::vector<EntityId> roots;
+    for (EntityId e : scene_->world().all_entities())
+        if (scene_->world().parent_of(e) == NULL_ENTITY) roots.push_back(e);
+    std::sort(roots.begin(), roots.end());
+    std::function<void(EntityId)> dfs = [&](EntityId e) {
+        out.push_back(e);
+        for (EntityId c : scene_->world().children_of(e)) dfs(c);
+    };
+    for (EntityId r : roots) dfs(r);
+    return out;
+}
+
+void EditorApp::select_range(EntityId anchor, EntityId e, bool add) {
+    const std::vector<EntityId> order = tree_order();
+    const auto ia = std::find(order.begin(), order.end(), anchor);
+    const auto ib = std::find(order.begin(), order.end(), e);
+    if (ia == order.end() || ib == order.end()) return;
+    const auto lo = std::min(ia, ib);
+    const auto hi = std::max(ia, ib);
+    if (!add) selection_.clear();
+    for (auto it = lo; it <= hi; ++it)
+        if (std::find(selection_.begin(), selection_.end(), *it) == selection_.end())
+            selection_.push_back(*it);
+    selected_ = e;
+}
+
+// Marquee selection: entities whose projected world AABB intersects the drag
+// rectangle (8-corner projection, not just corner rays).
+void EditorApp::marquee_select(const picking::ScreenRect& rect, bool add, bool remove) {
+    const FramebufferSize fb = window_->framebuffer_size();
+    if (fb.width == 0 || fb.height == 0) return;
+    const Camera& cam = view_cam_;
+    const f32 aspect = static_cast<f32>(fb.width) / static_cast<f32>(fb.height);
+    std::vector<EntityId> hits;
+    World& w = scene_->world();
+    for (EntityId e : w.all_entities()) {
+        if (!w.get<MeshRendererComponent>(e)) continue;
+        const auto* tc = w.get<TransformComponent>(e);
+        if (!tc) continue;
+        const math::Mat4 wm = world_matrix(w, e);
+        const math::Vec3 center{static_cast<f32>(wm[3][0]), static_cast<f32>(wm[3][1]),
+                                static_cast<f32>(wm[3][2])};
+        const picking::ScreenRect r =
+            picking::project_aabb(cam, aspect, static_cast<f32>(fb.width), static_cast<f32>(fb.height),
+                                  center, tc->scale * 0.5f);
+        if (picking::rects_intersect(rect, r)) hits.push_back(e);
+    }
+    if (!add && !remove) {
+        // Deterministic primary: last hit in tree order (not iteration order).
+        const std::vector<EntityId> order = tree_order();
+        std::sort(hits.begin(), hits.end(), [&](EntityId a, EntityId b) {
+            const auto ia = std::find(order.begin(), order.end(), a);
+            const auto ib = std::find(order.begin(), order.end(), b);
+            return ia < ib;
+        });
+        selection_ = hits;
+        selected_ = hits.empty() ? NULL_ENTITY : hits.back();
+    } else if (add) {
+        for (EntityId e : hits) select_add(e);
+    } else {
+        for (EntityId e : hits) select_remove(e);
+    }
+}
+
 void EditorApp::delete_entity(EntityId e) {
     if (!scene_->world().alive(e)) return;
     history_->begin("delete '" + scene_->world().name_of(e) + "'");
     scripts_->on_entity_destroyed(e); // fire on_destroy
     scene_->world().destroy_entity(e);
-    if (selected_ == e) selected_ = NULL_ENTITY;
+    select_remove(e);
     history_->commit();
     IGNIS_INFO("deleted entity {}", e);
+}
+
+// The whole selection is deleted as one undo transaction.
+void EditorApp::delete_selected() {
+    if (selection_.empty()) return;
+    const std::vector<EntityId> targets = selection_;
+    history_->begin("delete " + std::to_string(targets.size()) + " entities");
+    for (EntityId e : targets) {
+        if (!scene_->world().alive(e)) continue;
+        scripts_->on_entity_destroyed(e);
+        scene_->world().destroy_entity(e);
+        select_remove(e);
+    }
+    history_->commit();
+    IGNIS_INFO("deleted {} entities", targets.size());
 }
 
 void EditorApp::duplicate_entity(EntityId e) {
@@ -974,7 +1138,36 @@ void EditorApp::duplicate_entity(EntityId e) {
         if (const ComponentTypeInfo* info = w.registry().find_by_type(type))
             info->copy(w, e, copy);
     }
-    selected_ = copy;
+    select_replace(copy);
+    history_->commit();
+}
+
+// Duplicating several entities is one undo transaction; the copies join the
+// selection.
+void EditorApp::duplicate_selected() {
+    if (selection_.empty()) return;
+    // One semantic for 1..N selected: the copies JOIN the selection and the
+    // last copy becomes primary (no special-casing of the single case).
+    const std::vector<EntityId> targets = selection_;
+    history_->begin("duplicate " + std::to_string(targets.size()) + " entities");
+    World& w = scene_->world();
+    for (EntityId e : targets) {
+        if (!w.alive(e)) continue;
+        EntityId copy = w.create_entity(w.name_of(e) + " copy");
+        w.set_parent(copy, w.parent_of(e));
+        if (const auto* t = w.get<TransformComponent>(e)) {
+            auto& ct = *w.emplace<TransformComponent>(copy);
+            ct = *t;
+            ct.position.x += 1.f;
+        }
+        for (const auto& [type, storage] : w.storages()) {
+            if (!storage->has(e)) continue;
+            if (const ComponentTypeInfo* info = w.registry().find_by_type(type))
+                info->copy(w, e, copy);
+        }
+        selection_.push_back(copy);
+    }
+    selected_ = selection_.back();
     history_->commit();
 }
 
@@ -982,9 +1175,8 @@ void EditorApp::undo() {
     if (!history_ || !history_->can_undo()) return;
     const std::string label = history_->undo_label();
     if (history_->undo()) {
-        // Entity ids survive load_json; drop the selection only if the entity
-        // no longer exists in the restored state.
-        if (selected_ != NULL_ENTITY && !scene_->world().alive(selected_)) selected_ = NULL_ENTITY;
+        // Entity ids survive load_json; drop dead ids from the selection.
+        prune_selection();
         IGNIS_INFO("undo '{}'", label);
     }
 }
@@ -993,7 +1185,7 @@ void EditorApp::redo() {
     if (!history_ || !history_->can_redo()) return;
     const std::string label = history_->redo_label();
     if (history_->redo()) {
-        if (selected_ != NULL_ENTITY && !scene_->world().alive(selected_)) selected_ = NULL_ENTITY;
+        prune_selection();
         IGNIS_INFO("redo '{}'", label);
     }
 }
@@ -1046,10 +1238,10 @@ void EditorApp::draw_menu_bar() {
         if (ImGui::MenuItem(redo_label.c_str(), "Ctrl+Shift+Z / Ctrl+Y", false, can_redo)) redo();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("redo the last undone change");
         ImGui::Separator();
-        if (ImGui::MenuItem("Delete selected", "Del", false, has_sel)) delete_entity(selected_);
-        item_tooltip("delete the selected entity and its children");
-        if (ImGui::MenuItem("Duplicate selected", "Ctrl+D", false, has_sel)) duplicate_entity(selected_);
-        item_tooltip("create a copy of the selected entity (offset by +1 on X)");
+        if (ImGui::MenuItem("Delete selected", "Del", false, has_sel)) delete_selected();
+        item_tooltip("delete all selected entities as one undoable action");
+        if (ImGui::MenuItem("Duplicate selected", "Ctrl+D", false, has_sel)) duplicate_selected();
+        item_tooltip("copy all selected entities (offset by +1 on X) as one undoable action");
         if (ImGui::MenuItem("Frame selected", "F", false, has_sel)) frame_selected();
         item_tooltip("move the camera to look at the selected entity");
         if (ImGui::MenuItem("Frame scene", "Shift+F")) frame_scene();
@@ -1148,7 +1340,7 @@ void EditorApp::draw_gameobject_menu() {
             if (ImGui::MenuItem(("Prefab: " + p).c_str())) {
                 const EntityId e = scene_->spawn_prefab(p);
                 if (e != NULL_ENTITY) {
-                    selected_ = e;
+                    select_replace(e);
                     IGNIS_INFO("spawned prefab '{}' (#%llu)", p, static_cast<unsigned long long>(e));
                 }
             }
@@ -1284,11 +1476,17 @@ void EditorApp::draw_toolbar() {
     ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
-    if (selected_ != NULL_ENTITY && scene_->world().alive(selected_))
-        ImGui::Text("Selected: %s (#%llu)", scene_->world().name_of(selected_).c_str(),
-                    static_cast<unsigned long long>(selected_));
-    else
-        ImGui::TextDisabled("Selected: none (click an object in the viewport)");
+    if (selected_ != NULL_ENTITY && scene_->world().alive(selected_)) {
+        if (selection_.size() > 1)
+            ImGui::Text("Selected: %zu entities (%s #%llu primary)", selection_.size(),
+                        scene_->world().name_of(selected_).c_str(),
+                        static_cast<unsigned long long>(selected_));
+        else
+            ImGui::Text("Selected: %s (#%llu)", scene_->world().name_of(selected_).c_str(),
+                        static_cast<unsigned long long>(selected_));
+    } else {
+        ImGui::TextDisabled("Selected: none (click/drag in the viewport; Ctrl adds, Ctrl+Shift removes)");
+    }
     ImGui::End();
 }
 
@@ -1298,7 +1496,8 @@ void EditorApp::draw_hierarchy_node(EntityId e) {
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth |
                                 ImGuiTreeNodeFlags_DefaultOpen;
     if (children.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
-    if (selected_ == e) flags |= ImGuiTreeNodeFlags_Selected;
+    if (std::find(selection_.begin(), selection_.end(), e) != selection_.end())
+        flags |= ImGuiTreeNodeFlags_Selected;
     const bool open = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<intptr_t>(e)), flags,
                                         "%s", w.name_of(e).c_str());
     if (ImGui::IsItemHovered()) {
@@ -1332,12 +1531,20 @@ void EditorApp::draw_hierarchy_node(EntityId e) {
         }
         ImGui::EndDragDropTarget();
     }
-    if (ImGui::IsItemClicked()) selected_ = e;
+    if (ImGui::IsItemClicked()) {
+        ImGuiIO& io_h = ImGui::GetIO();
+        if (io_h.KeyShift)
+            select_range(selected_ != NULL_ENTITY ? selected_ : e, e, io_h.KeyCtrl);
+        else if (io_h.KeyCtrl)
+            select_toggle(e);
+        else
+            select_replace(e);
+    }
     if (ImGui::BeginPopupContextItem()) {
         if (ImGui::MenuItem("Create child")) {
             EntityId c = w.create_entity("New Entity");
             w.set_parent(c, e);
-            selected_ = c;
+            select_replace(c);
         }
         item_tooltip("create an empty entity as a child of this one");
         if (ImGui::MenuItem("Rename")) {
@@ -1392,9 +1599,14 @@ void EditorApp::draw_hierarchy() {
         for (EntityId e : w.all_entities()) {
             const std::string name = w.name_of(e);
             if (lower(name).find(f) == std::string::npos) continue;
-            if (ImGui::Selectable(name.c_str(), selected_ == e)) selected_ = e;
+            const bool in_sel = std::find(selection_.begin(), selection_.end(), e) != selection_.end();
+            if (ImGui::Selectable(name.c_str(), in_sel)) {
+                ImGuiIO& io_f = ImGui::GetIO();
+                if (io_f.KeyCtrl) select_toggle(e);
+                else select_replace(e);
+            }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("#%llu - click to select", static_cast<unsigned long long>(e));
+                ImGui::SetTooltip("#%llu - click to select, Ctrl+click to toggle", static_cast<unsigned long long>(e));
         }
     } else {
         std::vector<EntityId> roots;
@@ -1814,11 +2026,11 @@ void EditorApp::draw_status_bar(f32 dt) {
     const RenderStats st = renderer_->stats();
     const char* gizmo_name = gizmo_op_ == GizmoOp::Translate ? "Translate"
                            : gizmo_op_ == GizmoOp::Rotate ? "Rotate" : "Scale";
-    ImGui::Text("%.0f fps  %.2f ms | draws %u | tris %u | entities %llu | gizmo %s | undo %u | redo %u | %s",
+    ImGui::Text("%.0f fps  %.2f ms | draws %u | tris %u | entities %llu | sel %zu | gizmo %s | undo %u | redo %u | %s",
                 static_cast<double>(dt > 0.f ? 1.f / dt : 0.f), static_cast<double>(dt * 1000.f),
                 st.draw_calls, st.triangles,
-                static_cast<unsigned long long>(scene_->world().entity_count()), gizmo_name,
-                history_ ? history_->undo_depth() : 0u, history_ ? history_->redo_depth() : 0u,
+                static_cast<unsigned long long>(scene_->world().entity_count()), selection_.size(),
+                gizmo_name, history_ ? history_->undo_depth() : 0u, history_ ? history_->redo_depth() : 0u,
                 playing_ ? "playing" : "paused");
     ImGui::End();
 }
@@ -1900,7 +2112,7 @@ void EditorApp::draw_viewport_overlay(const Camera& camera, EntityId cam_entity)
     char buf[512];
     std::snprintf(buf, sizeof(buf),
                   "scene: %s  [%s]\ncamera: %s%s  pos(%.1f, %.1f, %.1f)  %s\nselected: %s\n"
-                  "RMB look | WASDQE fly | wheel dolly | LMB select | W/E/R gizmo | F / Shift+F | Ctrl+S | P",
+                  "RMB look | WASDQE fly | wheel dolly | LMB click/drag = select/marquee | W/E/R gizmo | F / Shift+F | Ctrl+S | P",
                   scene_->name().c_str(), scene_path_.c_str(), cam_name,
                   standalone_cam_ ? " (editor cam)" : "",
                   static_cast<double>(camera.position.x), static_cast<double>(camera.position.y),
@@ -1909,6 +2121,15 @@ void EditorApp::draw_viewport_overlay(const Camera& camera, EntityId cam_entity)
     const ImVec2 pos(10.f, ImGui::GetFrameHeight() * 2.f + 10.f);
     dl->AddText(ImVec2(pos.x + 1.f, pos.y + 1.f), IM_COL32(0, 0, 0, 180), buf);
     dl->AddText(pos, IM_COL32(220, 220, 220, 255), buf);
+    // Rubber-band marquee while dragging on empty viewport space.
+    if (marquee_active_) {
+        const ImVec2 a(lmb_press_.x, lmb_press_.y);
+        const ImVec2 b(marquee_end_.x, marquee_end_.y);
+        const ImVec2 mn(std::min(a.x, b.x), std::min(a.y, b.y));
+        const ImVec2 mx(std::max(a.x, b.x), std::max(a.y, b.y));
+        dl->AddRectFilled(mn, mx, IM_COL32(80, 140, 255, 40));
+        dl->AddRect(mn, mx, IM_COL32(120, 170, 255, 220));
+    }
 }
 
 // Geometry for the viewport debug toggles, fed into the renderer's DebugLine
