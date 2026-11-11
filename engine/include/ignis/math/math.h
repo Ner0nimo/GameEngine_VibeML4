@@ -39,6 +39,14 @@ inline Mat4 perspective_vk(f32 fov_y_rad, f32 aspect, f32 z_near, f32 z_far) {
     return m;
 }
 
+// Orthographic projection, depth range [0, 1] as used by Vulkan.
+inline Mat4 ortho_vk(f32 left, f32 right, f32 bottom, f32 top, f32 z_near, f32 z_far) {
+    Mat4 m = glm::ortho(left, right, bottom, top, z_near, z_far);
+    m[2][2] = 1.f / (z_near - z_far);
+    m[3][2] = z_near / (z_near - z_far);
+    return m;
+}
+
 inline Vec3 forward(const Quat& q) { return glm::rotate(q, Vec3(0.f, 0.f, -1.f)); }
 inline Vec3 right(const Quat& q)   { return glm::rotate(q, Vec3(1.f, 0.f, 0.f)); }
 inline Vec3 up(const Quat& q)      { return glm::rotate(q, Vec3(0.f, 1.f, 0.f)); }

@@ -21,11 +21,18 @@ struct Camera {
     f32 fov_y_deg = 60.f;
     f32 z_near = 0.1f;
     f32 z_far = 1000.f;
+    // Orthographic mode: ortho_size is the half-height of the view volume in
+    // world units (like Unity's "Size"); the width follows the aspect ratio.
+    bool orthographic = false;
+    f32 ortho_size = 10.f;
 
     math::Mat4 view_matrix() const {
         return glm::inverse(glm::translate(math::Mat4(1.f), position) * glm::mat4_cast(rotation));
     }
     math::Mat4 projection_matrix(f32 aspect) const {
+        if (orthographic)
+            return math::ortho_vk(-ortho_size * aspect, ortho_size * aspect, -ortho_size, ortho_size,
+                                  z_near, z_far);
         return math::perspective_vk(math::radians(fov_y_deg), aspect, z_near, z_far);
     }
 };
