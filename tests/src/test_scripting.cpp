@@ -55,7 +55,7 @@ TEST(Scripting, EntityLifecycleAndComponents) {
 
     const std::string script_path = write_script("ignis_mover_test.lua", kMoverScript);
     EntityId e = scene.world().create_entity("scripted");
-    scene.world().emplace<ScriptComponent>(e).path = script_path;
+    scene.world().emplace<ScriptComponent>(e)->path = script_path;
 
     const f32 dt = 1.f / 60.f;
     for (int i = 0; i < 10; ++i) scripts.update(dt);
@@ -81,6 +81,57 @@ TEST(Scripting, EntityLifecycleAndComponents) {
     std::filesystem::remove(script_path);
 }
 
+// Security regression (#46): component ops through the Lua bindings must
+// reject dead entity ids safely (refusal/absence), never write into storage
+// and never abort the script with an uncaught error.
+TEST(Scripting, DeadEntityComponentOpsAreSafe) {
+    Scene scene("dead_id_test");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    ScriptEngine scripts;
+    ASSERT_TRUE(scripts.init(&scene, &assets).ok());
+
+    const std::string path = write_script("ignis_dead_id_test.lua", R"LUA(
+function on_update(self, dt)
+    if ignis.frame() == 2 then
+        local v = ignis.entity.create("victim")
+        ignis.entity.destroy(v)
+        -- Every op on the dead id must be refused/absent, not crash.
+        ignis.entity.add_component(v, "Transform", {position = {1, 2, 3}})
+        ignis.entity.get_component(v, "Transform")
+        ignis.entity.has_component(v, "Transform")
+        ignis.entity.remove_component(v, "Transform")
+        ignis.entity.create("after") -- recycles v: must stay component-free
+    end
+    if ignis.frame() == 3 then
+        -- Marker: proves the script survived the dead-id operations above.
+        ignis.entity.add_component(self.entity, "Transform", {position = {5, 5, 5}})
+    end
+end
+)LUA");
+    EntityId e = scene.world().create_entity("scripted");
+    scene.world().emplace<ScriptComponent>(e)->path = path;
+    for (int i = 0; i < 5; ++i) scripts.update(1.f / 60.f);
+
+    // The script ran to completion past the dead-id operations.
+    const auto* t = scene.world().get<TransformComponent>(e);
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->position.x, 5.f);
+
+    // The victim is gone, and the recycled id started component-clean.
+    EntityId after = NULL_ENTITY;
+    u32 victims = 0;
+    for (EntityId id : scene.world().all_entities()) {
+        if (scene.world().name_of(id) == "victim") ++victims;
+        if (scene.world().name_of(id) == "after") after = id;
+    }
+    EXPECT_EQ(victims, 0u);
+    ASSERT_NE(after, NULL_ENTITY);
+    EXPECT_FALSE(scene.world().has<TransformComponent>(after));
+    EXPECT_EQ(scene.world().get<TransformComponent>(after), nullptr);
+    std::filesystem::remove(path);
+}
+
 TEST(Scripting, PrefabSpawnFromLua) {
     Scene scene("prefab_test");
     register_builtin_components(scene.world());
@@ -98,7 +149,7 @@ function on_update(self, dt)
 end
 )LUA");
     EntityId e = scene.world().create_entity("s");
-    scene.world().emplace<ScriptComponent>(e).path = path;
+    scene.world().emplace<ScriptComponent>(e)->path = path;
     for (int i = 0; i < 3; ++i) scripts.update(0.016f);
 
     u32 count = 0;
@@ -120,7 +171,7 @@ TEST(Scripting, BadScriptReportsError) {
     ASSERT_TRUE(scripts.init(&scene, &assets).ok());
     const std::string path = write_script("ignis_bad_test.lua", "this is not lua {{{");
     EntityId e = scene.world().create_entity("s");
-    scene.world().emplace<ScriptComponent>(e).path = path;
+    scene.world().emplace<ScriptComponent>(e)->path = path;
     scripts.update(0.016f); // must not crash; error is logged
     EXPECT_TRUE(scene.world().alive(e));
     std::filesystem::remove(path);
@@ -155,7 +206,7 @@ function on_create(self)
 end
 )LUA");
     EntityId e = scene.world().create_entity("s");
-    scene.world().emplace<ScriptComponent>(e).path = path;
+    scene.world().emplace<ScriptComponent>(e)->path = path;
     scripts.update(0.016f);
     EXPECT_TRUE(entity_named_exists(scene, "sandbox_ok"));
     EXPECT_FALSE(entity_named_exists(scene, "sandbox_fail"));
@@ -183,9 +234,9 @@ function on_create(self)
 end
 )LUA");
     EntityId a = scene.world().create_entity("a");
-    scene.world().emplace<ScriptComponent>(a).path = path_a;
+    scene.world().emplace<ScriptComponent>(a)->path = path_a;
     EntityId b = scene.world().create_entity("b");
-    scene.world().emplace<ScriptComponent>(b).path = path_b;
+    scene.world().emplace<ScriptComponent>(b)->path = path_b;
     scripts.update(0.016f);
     EXPECT_TRUE(entity_named_exists(scene, "isolated_ok"));
     EXPECT_FALSE(entity_named_exists(scene, "isolated_fail"));
@@ -213,9 +264,9 @@ function on_update(self, dt)
 end
 )LUA");
     EntityId bad = scene.world().create_entity("bad");
-    scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+    scene.world().emplace<ScriptComponent>(bad)->path = bad_path;
     EntityId good = scene.world().create_entity("good");
-    scene.world().emplace<ScriptComponent>(good).path = good_path;
+    scene.world().emplace<ScriptComponent>(good)->path = good_path;
     for (int i = 0; i < 3; ++i) scripts.update(0.016f); // must return, not hang
     EXPECT_TRUE(entity_named_exists(scene, "good_ok"));   // engine still functional
     EXPECT_TRUE(scene.world().alive(bad));                 // error swallowed, entity intact
@@ -244,9 +295,9 @@ function on_update(self, dt)
 end
 )LUA");
     EntityId bad = scene.world().create_entity("bad");
-    scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+    scene.world().emplace<ScriptComponent>(bad)->path = bad_path;
     EntityId good = scene.world().create_entity("good");
-    scene.world().emplace<ScriptComponent>(good).path = good_path;
+    scene.world().emplace<ScriptComponent>(good)->path = good_path;
     for (int i = 0; i < 3; ++i) scripts.update(0.016f); // must not crash
     EXPECT_TRUE(entity_named_exists(scene, "after_cyclic_ok"));
     std::filesystem::remove(bad_path);
@@ -268,9 +319,9 @@ function on_update(self, dt)
 end
 )LUA");
     EntityId bad = scene.world().create_entity("bad");
-    scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+    scene.world().emplace<ScriptComponent>(bad)->path = bad_path;
     EntityId good = scene.world().create_entity("good");
-    scene.world().emplace<ScriptComponent>(good).path = good_path;
+    scene.world().emplace<ScriptComponent>(good)->path = good_path;
     for (int i = 0; i < 2; ++i) scripts.update(0.016f);
     EXPECT_TRUE(entity_named_exists(scene, "still_works"));
     EXPECT_TRUE(scene.world().alive(bad));
@@ -292,7 +343,7 @@ function on_create(self)
 end
 )LUA");
     EntityId e = scene.world().create_entity("s");
-    scene.world().emplace<ScriptComponent>(e).path = path;
+    scene.world().emplace<ScriptComponent>(e)->path = path;
     scripts.update(0.016f);
     EXPECT_TRUE(entity_named_exists(scene, "keys_ok_marker")); // conversion did not error
     std::filesystem::remove(path);
@@ -316,9 +367,9 @@ function on_update(self, dt)
 end
 )LUA");
         EntityId bad = scene.world().create_entity("bad");
-        scene.world().emplace<ScriptComponent>(bad).path = bad_path;
+        scene.world().emplace<ScriptComponent>(bad)->path = bad_path;
         EntityId good = scene.world().create_entity("good");
-        scene.world().emplace<ScriptComponent>(good).path = good_path;
+        scene.world().emplace<ScriptComponent>(good)->path = good_path;
         for (int i = 0; i < 3; ++i) scripts.update(0.016f); // must not crash
         EXPECT_FALSE(entity_named_exists(scene, "should_not_happen")) << bad_key_case;
         EXPECT_TRUE(entity_named_exists(scene, "engine_still_ok")) << bad_key_case;
@@ -358,9 +409,9 @@ function on_create(self)
 end
 )LUA");
     EntityId a = scene.world().create_entity("a");
-    scene.world().emplace<ScriptComponent>(a).path = path_a;
+    scene.world().emplace<ScriptComponent>(a)->path = path_a;
     EntityId b = scene.world().create_entity("b");
-    scene.world().emplace<ScriptComponent>(b).path = path_b;
+    scene.world().emplace<ScriptComponent>(b)->path = path_b;
     scripts.update(0.016f);
     EXPECT_TRUE(entity_named_exists(scene, "ro_ok"));
     EXPECT_FALSE(entity_named_exists(scene, "ro_fail"));
@@ -398,9 +449,9 @@ function on_create(self)
 end
 )LUA");
     EntityId a = scene.world().create_entity("a");
-    scene.world().emplace<ScriptComponent>(a).path = path_a;
+    scene.world().emplace<ScriptComponent>(a)->path = path_a;
     EntityId b = scene.world().create_entity("b");
-    scene.world().emplace<ScriptComponent>(b).path = path_b;
+    scene.world().emplace<ScriptComponent>(b)->path = path_b;
     scripts.update(0.016f);
     EXPECT_TRUE(entity_named_exists(scene, "libro_ok"));
     EXPECT_FALSE(entity_named_exists(scene, "libro_fail"));
@@ -427,7 +478,7 @@ function on_create(self)
 end
 )LUA");
     EntityId e = scene.world().create_entity("bomber");
-    scene.world().emplace<ScriptComponent>(e).path = path;
+    scene.world().emplace<ScriptComponent>(e)->path = path;
     scripts.update(0.016f); // controlled error, no crash, no OOM
     EXPECT_FALSE(entity_named_exists(scene, "bomb_succeeded"));
     EXPECT_LE(scripts.memory_used(), scripts.memory_budget());
@@ -470,7 +521,7 @@ end
     const std::string path = write_script("ignis_savepol.lua", code);
 
     EntityId e = scene.world().create_entity("s");
-    scene.world().emplace<ScriptComponent>(e).path = path;
+    scene.world().emplace<ScriptComponent>(e)->path = path;
 
     // Phase 1 (frames 1-2): exported-runtime policy - host paths disallowed.
     scripts.set_host_paths_allowed(false);
@@ -519,7 +570,7 @@ function on_create(self)
 end
 )LUA");
     EntityId e = scene.world().create_entity("s");
-    scene.world().emplace<ScriptComponent>(e).path = bad_path;
+    scene.world().emplace<ScriptComponent>(e)->path = bad_path;
     scripts.update(0.016f);
     EXPECT_TRUE(entity_named_exists(scene, "dead_rejected"));
     EXPECT_FALSE(entity_named_exists(scene, "dead_accepted"));

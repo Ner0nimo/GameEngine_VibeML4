@@ -25,8 +25,8 @@ TEST(Ecs, Components) {
     register_builtin_components(w);
     EntityId e = w.create_entity("e");
     EXPECT_FALSE(w.has<TransformComponent>(e));
-    auto& t = w.emplace<TransformComponent>(e);
-    t.position = {1.f, 2.f, 3.f};
+    auto* t = w.emplace<TransformComponent>(e);
+    t->position = {1.f, 2.f, 3.f};
     EXPECT_TRUE(w.has<TransformComponent>(e));
     EXPECT_EQ(w.get<TransformComponent>(e)->position.y, 2.f);
     w.remove<TransformComponent>(e);
@@ -85,9 +85,9 @@ TEST(Ecs, SetParentRejectsCyclesAndDead) {
     EXPECT_EQ(w.parent_of(a), NULL_ENTITY);
     EXPECT_EQ(w.parent_of(c), b);
     // world_matrix still terminates and is correct.
-    w.emplace<TransformComponent>(a).position = {1.f, 0.f, 0.f};
-    w.emplace<TransformComponent>(b).position = {0.f, 2.f, 0.f};
-    w.emplace<TransformComponent>(c).position = {0.f, 0.f, 3.f};
+    w.emplace<TransformComponent>(a)->position = {1.f, 0.f, 0.f};
+    w.emplace<TransformComponent>(b)->position = {0.f, 2.f, 0.f};
+    w.emplace<TransformComponent>(c)->position = {0.f, 0.f, 3.f};
     const math::Mat4 m = world_matrix(w, c);
     const glm::vec4 p = m * glm::vec4(0.f, 0.f, 0.f, 1.f);
     EXPECT_NEAR(p.x, 1.f, 1e-5f);
@@ -100,9 +100,9 @@ TEST(Ecs, WorldMatrix) {
     register_builtin_components(w);
     EntityId parent = w.create_entity("parent");
     EntityId child = w.create_entity("child");
-    w.emplace<TransformComponent>(parent).position = {10.f, 0.f, 0.f};
-    auto& ct = w.emplace<TransformComponent>(child);
-    ct.position = {0.f, 5.f, 0.f};
+    w.emplace<TransformComponent>(parent)->position = {10.f, 0.f, 0.f};
+    auto* ct = w.emplace<TransformComponent>(child);
+    ct->position = {0.f, 5.f, 0.f};
     EXPECT_TRUE(w.set_parent(child, parent));
     const math::Mat4 m = world_matrix(w, child);
     const glm::vec4 p = m * glm::vec4(0.f, 0.f, 0.f, 1.f);
@@ -122,4 +122,55 @@ TEST(Ecs, RegistryByName) {
     EXPECT_EQ(w.get<TransformComponent>(e)->position.x, 7.f);
     const nlohmann::json out = info->serialize(w, e);
     EXPECT_EQ(out["position"][0].get<f32>(), 7.f);
+}
+
+// Security regression (#46): component operations must reject dead entities.
+// A stale id (from untrusted scene JSON, Lua or agent commands) must never
+// attach components to a destroyed entity, and has() must report liveness,
+// not raw storage presence.
+TEST(Ecs, ComponentOpsRejectDeadEntities) {
+    World w;
+    register_builtin_components(w);
+    EntityId e = w.create_entity("e");
+    ASSERT_NE(w.emplace<TransformComponent>(e), nullptr);
+    w.destroy_entity(e);
+    ASSERT_FALSE(w.alive(e));
+
+    // has/get answer "nothing on this id" for a dead entity.
+    EXPECT_FALSE(w.has<TransformComponent>(e));
+    EXPECT_EQ(w.get<TransformComponent>(e), nullptr);
+
+    // emplace refuses to attach; remove is a safe no-op.
+    EXPECT_EQ(w.emplace<TransformComponent>(e), nullptr);
+    w.remove<TransformComponent>(e);
+
+    // NULL_ENTITY is never alive either.
+    EXPECT_EQ(w.emplace<TransformComponent>(NULL_ENTITY), nullptr);
+    EXPECT_FALSE(w.has<TransformComponent>(NULL_ENTITY));
+    EXPECT_EQ(w.get<TransformComponent>(NULL_ENTITY), nullptr);
+
+    // The destroyed id is recycled: the new entity starts component-clean,
+    // and can opt in again.
+    EntityId r = w.create_entity("r");
+    EXPECT_EQ(r, e); // id recycled
+    EXPECT_FALSE(w.has<TransformComponent>(r));
+    EXPECT_NE(w.emplace<TransformComponent>(r), nullptr);
+    EXPECT_TRUE(w.has<TransformComponent>(r));
+}
+
+// The registry (scene loading, Lua add_component, agent add_component) must
+// report failure instead of writing components onto dead entities.
+TEST(Ecs, RegistryDeserializeRejectsDeadEntity) {
+    World w;
+    register_builtin_components(w);
+    const auto* info = w.registry().find_by_name("Transform");
+    ASSERT_NE(info, nullptr);
+    EntityId e = w.create_entity("e");
+    w.destroy_entity(e);
+
+    const nlohmann::json props = {{"position", {1.f, 2.f, 3.f}}};
+    EXPECT_FALSE(info->deserialize(w, e, props));
+    EXPECT_FALSE(w.has<TransformComponent>(e));
+    EXPECT_TRUE(info->serialize(w, e).empty());
+    info->remove(w, e); // no-op, must not crash
 }

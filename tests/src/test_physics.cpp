@@ -19,22 +19,22 @@ Scene make_physics_scene() {
     // Static ground: 20x1x20 box centered at origin.
     EntityId ground = scene.world().create_entity("ground");
     scene.world().emplace<TransformComponent>(ground);
-    auto& grb = scene.world().emplace<RigidBodyComponent>(ground);
-    grb.type = RigidBodyComponent::Type::Static;
-    auto& gc = scene.world().emplace<ColliderComponent>(ground);
-    gc.shape = ColliderComponent::Shape::Box;
-    gc.half_extents = {10.f, 1.f, 10.f};
+    auto* grb = scene.world().emplace<RigidBodyComponent>(ground);
+    grb->type = RigidBodyComponent::Type::Static;
+    auto* gc = scene.world().emplace<ColliderComponent>(ground);
+    gc->shape = ColliderComponent::Shape::Box;
+    gc->half_extents = {10.f, 1.f, 10.f};
 
     // Dynamic box 5 units above the ground.
     EntityId box = scene.world().create_entity("box");
-    auto& bt = scene.world().emplace<TransformComponent>(box);
-    bt.position = {0.f, 5.f, 0.f};
-    auto& brb = scene.world().emplace<RigidBodyComponent>(box);
-    brb.type = RigidBodyComponent::Type::Dynamic;
-    brb.mass = 1.f;
-    auto& bc = scene.world().emplace<ColliderComponent>(box);
-    bc.shape = ColliderComponent::Shape::Box;
-    bc.half_extents = {0.5f, 0.5f, 0.5f};
+    auto* bt = scene.world().emplace<TransformComponent>(box);
+    bt->position = {0.f, 5.f, 0.f};
+    auto* brb = scene.world().emplace<RigidBodyComponent>(box);
+    brb->type = RigidBodyComponent::Type::Dynamic;
+    brb->mass = 1.f;
+    auto* bc = scene.world().emplace<ColliderComponent>(box);
+    bc->shape = ColliderComponent::Shape::Box;
+    bc->half_extents = {0.5f, 0.5f, 0.5f};
     return scene;
 }
 
@@ -87,19 +87,19 @@ TEST(Physics, SphereCollider) {
     PhysicsSystem::register_components(scene.world());
     EntityId ground = scene.world().create_entity("ground");
     scene.world().emplace<TransformComponent>(ground);
-    auto& grb = scene.world().emplace<RigidBodyComponent>(ground);
-    grb.type = RigidBodyComponent::Type::Static;
-    auto& gc = scene.world().emplace<ColliderComponent>(ground);
-    gc.shape = ColliderComponent::Shape::Box;
-    gc.half_extents = {10.f, 1.f, 10.f};
+    auto* grb = scene.world().emplace<RigidBodyComponent>(ground);
+    grb->type = RigidBodyComponent::Type::Static;
+    auto* gc = scene.world().emplace<ColliderComponent>(ground);
+    gc->shape = ColliderComponent::Shape::Box;
+    gc->half_extents = {10.f, 1.f, 10.f};
 
     EntityId ball = scene.world().create_entity("ball");
-    auto& bt = scene.world().emplace<TransformComponent>(ball);
-    bt.position = {0.f, 4.f, 0.f};
+    auto* bt = scene.world().emplace<TransformComponent>(ball);
+    bt->position = {0.f, 4.f, 0.f};
     scene.world().emplace<RigidBodyComponent>(ball); // dynamic, mass 1
-    auto& bc = scene.world().emplace<ColliderComponent>(ball);
-    bc.shape = ColliderComponent::Shape::Sphere;
-    bc.radius = 0.5f;
+    auto* bc = scene.world().emplace<ColliderComponent>(ball);
+    bc->shape = ColliderComponent::Shape::Sphere;
+    bc->radius = 0.5f;
 
     PhysicsSystem physics(scene);
     ASSERT_TRUE(physics.init({0.f, -9.81f, 0.f}).ok());

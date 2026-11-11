@@ -861,7 +861,7 @@ EntityId EditorApp::create_gameobject(const std::string& kind) {
     EntityId e = w.create_entity(kind);
     w.emplace<TransformComponent>(e);
     if (kind == "Cube") {
-        w.emplace<MeshRendererComponent>(e).model_path = "assets/cube.gltf";
+        w.emplace<MeshRendererComponent>(e)->model_path = "assets/cube.gltf";
     } else if (kind == "Camera") {
         w.emplace<CameraComponent>(e);
     } else if (kind == "Directional Light") {
@@ -956,7 +956,7 @@ void EditorApp::duplicate_entity(EntityId e) {
     EntityId copy = w.create_entity(w.name_of(e) + " copy");
     w.set_parent(copy, w.parent_of(e));
     if (const auto* t = w.get<TransformComponent>(e)) {
-        auto& ct = w.emplace<TransformComponent>(copy);
+        auto& ct = *w.emplace<TransformComponent>(copy);
         ct = *t;
         ct.position.x += 1.f;
     }

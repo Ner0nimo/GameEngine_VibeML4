@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ignis/core/log.h"
 #include "ignis/core/types.h"
 #include "ignis/ecs/entity.h"
 
@@ -83,19 +84,32 @@ public:
     const std::vector<EntityId>& children_of(EntityId e) const noexcept;
 
     // --- components -------------------------------------------------------
+    // Component operations reject dead entities: a stale id (from scripts,
+    // scene JSON or agent commands) must not attach to, or read from, a
+    // destroyed entity. emplace reports the refusal, the read/remove paths
+    // treat it as an ordinary absence.
+
     template <typename T>
     void register_component_type(const std::string& name);
 
+    // Attaches (or overwrites) component T on entity e: caller owns a live
+    // entity or gets nullptr. The refusal is logged because writing to a
+    // dead id is either a stale handle (untrusted input) or a bug.
     template <typename T, typename... Args>
-    T& emplace(EntityId e, Args&&... args) {
+    T* emplace(EntityId e, Args&&... args) {
+        if (!alive(e)) {
+            IGNIS_WARN("World::emplace: entity {} is not alive; component not attached", e);
+            return nullptr;
+        }
         auto& storage = storage_for<T>();
         // Assign (not map::emplace) so re-adding a component overwrites it.
         storage.data_[e] = T(std::forward<Args>(args)...);
-        return storage.data_[e];
+        return &storage.data_[e];
     }
 
     template <typename T>
     T* get(EntityId e) {
+        if (!alive(e)) return nullptr;
         auto* s = find_storage<T>();
         if (!s) return nullptr;
         auto it = s->data_.find(e);
@@ -104,14 +118,18 @@ public:
 
     template <typename T>
     const T* get(EntityId e) const {
+        if (!alive(e)) return nullptr;
         auto* s = find_storage<T>();
         if (!s) return nullptr;
         auto it = s->data_.find(e);
         return it != s->data_.end() ? &it->second : nullptr;
     }
 
+    // Reports whether the live entity owns T; storage presence alone would
+    // also answer true for dead ids that bypassed the checks above.
     template <typename T>
     bool has(EntityId e) const {
+        if (!alive(e)) return false;
         auto* s = find_storage<T>();
         return s && s->data_.contains(e);
     }
@@ -121,6 +139,7 @@ public:
 
     template <typename T>
     void remove(EntityId e) {
+        if (!alive(e)) return; // dead ids own nothing: destroy_entity purges
         if (auto* s = find_storage<T>()) s->data_.erase(e);
     }
 

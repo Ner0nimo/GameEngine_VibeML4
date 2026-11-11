@@ -86,8 +86,9 @@ private:
         };
         info.deserialize = [](W& w, EntityId e, const nlohmann::json& j) -> bool {
             if (!j.is_object()) return false;
-            w.template emplace<T>(e, ComponentIO<T>::from_json(j));
-            return true;
+            // nullptr = dead entity: refuse, and let the caller (scene
+            // loader, Lua add_component, agent command) report it.
+            return w.template emplace<T>(e, ComponentIO<T>::from_json(j)) != nullptr;
         };
         info.copy = [](W& w, EntityId from, EntityId to) {
             if (const T* c = w.template get<T>(from)) w.template emplace<T>(to, *c);

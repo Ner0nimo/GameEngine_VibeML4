@@ -212,15 +212,15 @@ TEST(Audio, AudioSystemPlayOnStartAndControl) {
     AudioSystem sys(engine, &scene);
 
     EntityId e = scene.world().create_entity("emitter");
-    auto& t = scene.world().emplace<TransformComponent>(e);
-    t.position = {2.f, 1.f, 0.f};
-    auto& src = scene.world().emplace<AudioSourceComponent>(e);
-    src.path = "assets/test.wav";
-    src.loop = true;
-    src.play_on_start = true;
-    src.spatial = true;
-    src.min_distance = 1.f;
-    src.max_distance = 30.f;
+    auto* t = scene.world().emplace<TransformComponent>(e);
+    t->position = {2.f, 1.f, 0.f};
+    auto* src = scene.world().emplace<AudioSourceComponent>(e);
+    src->path = "assets/test.wav";
+    src->loop = true;
+    src->play_on_start = true;
+    src->spatial = true;
+    src->min_distance = 1.f;
+    src->max_distance = 30.f;
 
     const f32 dt = 1.f / 60.f;
     sys.update(scene.world(), dt);
@@ -228,7 +228,7 @@ TEST(Audio, AudioSystemPlayOnStartAndControl) {
     EXPECT_EQ(engine.active_sound_count(), 1u);
 
     // Moving the transform must not break positional sync.
-    t.position = {5.f, 1.f, 0.f};
+    t->position = {5.f, 1.f, 0.f};
     sys.update(scene.world(), dt);
     EXPECT_TRUE(sys.source_playing(e));
 
@@ -246,7 +246,7 @@ TEST(Audio, AudioSystemPlayOnStartAndControl) {
 
     // play_on_start must not fire for a source without the flag.
     EntityId e2 = scene.world().create_entity("quiet");
-    scene.world().emplace<AudioSourceComponent>(e2).path = "assets/test.wav";
+    scene.world().emplace<AudioSourceComponent>(e2)->path = "assets/test.wav";
     sys.update(scene.world(), dt);
     EXPECT_FALSE(sys.source_playing(e2));
     EXPECT_EQ(engine.active_sound_count(), 0u);

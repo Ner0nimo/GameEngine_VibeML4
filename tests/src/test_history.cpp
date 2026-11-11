@@ -14,7 +14,7 @@ Scene make_scene() {
     Scene scene("hist");
     register_builtin_components(scene.world());
     EntityId e = scene.world().create_entity("box");
-    scene.world().emplace<TransformComponent>(e).position = {1.f, 2.f, 3.f};
+    scene.world().emplace<TransformComponent>(e)->position = {1.f, 2.f, 3.f};
     return scene;
 }
 
