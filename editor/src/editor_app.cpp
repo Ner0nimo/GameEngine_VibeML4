@@ -38,6 +38,7 @@
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <vector>
 #endif
 
@@ -120,16 +121,22 @@ Result<void> EditorApp::init_window_and_renderer() {
     props.title = "Ignis Editor";
     props.width = 1280;
     props.height = 720;
-    props.resizable = false; // windowed swapchain recreation is not implemented yet
+    props.resizable = true; // swapchain recreation is handled by the renderer (issue #53)
     window_ = std::make_unique<Window>(props);
     if (auto r = window_->init(); !r.ok())
         return Result<void>::failure("window init failed: " + r.error());
+    load_window_settings(); // restore size/maximized state from the last session
 
     assets_ = std::make_unique<AssetManager>();
     renderer_ = std::make_unique<VulkanRenderer>();
     renderer_->set_asset_manager(assets_.get());
     if (auto r = renderer_->init(window_.get()); !r.ok())
         return Result<void>::failure("renderer init failed: " + r.error());
+    // Framebuffer resize -> pending resize in the renderer; the next render()
+    // recreates the swapchain after waitForIdle (never inside the callback).
+    window_->on_resize = [this](u32 w, u32 h) {
+        if (renderer_) renderer_->request_resize(w, h);
+    };
     return Result<void>::success();
 }
 
@@ -154,7 +161,7 @@ Result<void> EditorApp::init_scene_and_systems(const std::string& scene_path,
     audio_sys_ = std::make_unique<AudioSystem>(*audio_, scene_.get());
     AudioSystem::register_lua_bindings(scripts_->state());
     physics_ = std::make_unique<PhysicsSystem>(*scene_);
-    if (auto r = physics_->init({0.f, -9.81f, 0.f}); !r.ok())
+    if (auto r = physics_->init(scene_->settings().gravity); !r.ok())
         return Result<void>::failure("physics init failed: " + r.error());
     PhysicsSystem::register_lua_bindings(scripts_->state());
     scene_->add_system([&](World&, f32 dt) { scripts_->update(dt); });
@@ -188,18 +195,14 @@ Result<void> EditorApp::init_imgui_ui() {
     ui_.queue = static_cast<VkQueue>(rh.queue);
     VkDevice& device = ui_.device;
     VkQueue& queue = ui_.queue;
-    const VkSwapchainKHR swapchain = static_cast<VkSwapchainKHR>(rh.swapchain);
-    const VkFormat swapFormat = static_cast<VkFormat>(rh.swap_format);
-    u32 imageCount = rh.swap_image_count;
-    std::vector<VkImage> swapImages(imageCount);
-    vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapImages.data());
-    ui_.image_count = imageCount;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
+    base_style_ = ImGui::GetStyle(); // pristine copy for DPI re-scaling
+    apply_content_scale(window_->content_scale().x);
     ImGui_ImplGlfw_InitForVulkan(window_->handle(), true);
     ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, imgui_vk_loader, instance);
 
@@ -226,58 +229,8 @@ Result<void> EditorApp::init_imgui_ui() {
         vkCreateDescriptorPool(device, &ci, nullptr, &ui_.pool);
     }
 
-    // UI render pass: loads the scene-rendered swapchain image (NVRHI leaves
-    // it in PRESENT_SRC_KHR thanks to keepInitialState) and keeps it there.
-    {
-        VkRenderPass& uiRenderPass = ui_.render_pass;
-        VkAttachmentDescription att{};
-        att.format = swapFormat;
-        att.samples = VK_SAMPLE_COUNT_1_BIT;
-        att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        att.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        VkAttachmentReference ref{};
-        ref.attachment = 0;
-        ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        VkSubpassDescription sub{};
-        sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        sub.colorAttachmentCount = 1;
-        sub.pColorAttachments = &ref;
-        VkRenderPassCreateInfo ci{};
-        ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        ci.attachmentCount = 1;
-        ci.pAttachments = &att;
-        ci.subpassCount = 1;
-        ci.pSubpasses = &sub;
-        vkCreateRenderPass(device, &ci, nullptr, &uiRenderPass);
-    }
-
-    ui_.views.resize(imageCount);
-    ui_.fbs.resize(imageCount);
-    VkRenderPass& uiRenderPass = ui_.render_pass;
-    for (u32 i = 0; i < imageCount; ++i) {
-        VkImageViewCreateInfo vi{};
-        vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        vi.image = swapImages[i];
-        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        vi.format = swapFormat;
-        vi.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                         VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
-        vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        vkCreateImageView(device, &vi, nullptr, &ui_.views[i]);
-        VkFramebufferCreateInfo fi{};
-        fi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fi.renderPass = uiRenderPass;
-        fi.attachmentCount = 1;
-        fi.pAttachments = &ui_.views[i];
-        fi.width = rh.width;
-        fi.height = rh.height;
-        fi.layers = 1;
-        vkCreateFramebuffer(device, &fi, nullptr, &ui_.fbs[i]);
-    }
+    // Swapchain-dependent UI resources (render pass, image views, framebuffers).
+    if (auto r = create_ui_swapchain_resources(); !r.ok()) return r;
 
     {
         VkCommandPoolCreateInfo ci{};
@@ -302,7 +255,7 @@ Result<void> EditorApp::init_imgui_ui() {
     imguiInfo.Queue = queue;
     imguiInfo.DescriptorPool = ui_.pool;
     imguiInfo.MinImageCount = 2;
-    imguiInfo.ImageCount = imageCount;
+    imguiInfo.ImageCount = ui_.image_count;
     imguiInfo.UseDynamicRendering = false;
     imguiInfo.PipelineInfoMain.RenderPass = ui_.render_pass;
     imguiInfo.PipelineInfoMain.Subpass = 0;
@@ -311,6 +264,155 @@ Result<void> EditorApp::init_imgui_ui() {
     ImGui_ImplVulkan_Init(&imguiInfo); // font texture is created lazily on first NewFrame
     load_editor_state(); // viewport/camera prefs from the previous session
     return Result<void>::success();
+}
+
+// --- swapchain-dependent UI resources (issue #53) ------------------------------
+
+Result<void> EditorApp::create_ui_swapchain_resources() {
+    const RawVulkanHandles rh = renderer_->raw_handles();
+    if (!rh.windowed || rh.swapchain == nullptr)
+        return Result<void>::failure("no swapchain (offscreen renderer?)");
+    const VkDevice device = ui_.device;
+    const VkSwapchainKHR swapchain = static_cast<VkSwapchainKHR>(rh.swapchain);
+    const VkFormat swapFormat = static_cast<VkFormat>(rh.swap_format);
+    u32 imageCount = rh.swap_image_count;
+    std::vector<VkImage> swapImages(imageCount);
+    vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapImages.data());
+
+    // UI render pass: loads the scene-rendered swapchain image (NVRHI leaves
+    // it in PRESENT_SRC_KHR thanks to keepInitialState) and keeps it there.
+    {
+        VkAttachmentDescription att{};
+        att.format = swapFormat;
+        att.samples = VK_SAMPLE_COUNT_1_BIT;
+        att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        att.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        VkAttachmentReference ref{};
+        ref.attachment = 0;
+        ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkSubpassDescription sub{};
+        sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount = 1;
+        sub.pColorAttachments = &ref;
+        VkRenderPassCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        ci.attachmentCount = 1;
+        ci.pAttachments = &att;
+        ci.subpassCount = 1;
+        ci.pSubpasses = &sub;
+        vkCreateRenderPass(device, &ci, nullptr, &ui_.render_pass);
+    }
+
+    ui_.views.resize(imageCount);
+    ui_.fbs.resize(imageCount);
+    for (u32 i = 0; i < imageCount; ++i) {
+        VkImageViewCreateInfo vi{};
+        vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vi.image = swapImages[i];
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = swapFormat;
+        vi.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                         VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+        vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCreateImageView(device, &vi, nullptr, &ui_.views[i]);
+        VkFramebufferCreateInfo fi{};
+        fi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fi.renderPass = ui_.render_pass;
+        fi.attachmentCount = 1;
+        fi.pAttachments = &ui_.views[i];
+        fi.width = rh.width;
+        fi.height = rh.height;
+        fi.layers = 1;
+        vkCreateFramebuffer(device, &fi, nullptr, &ui_.fbs[i]);
+    }
+    ui_.image_count = imageCount;
+    ui_.fb_width = rh.width;
+    ui_.fb_height = rh.height;
+    ui_.format = swapFormat;
+    return Result<void>::success();
+}
+
+void EditorApp::destroy_ui_swapchain_resources() {
+    const VkDevice device = ui_.device;
+    if (device == VK_NULL_HANDLE) return;
+    for (VkFramebuffer fb : ui_.fbs) vkDestroyFramebuffer(device, fb, nullptr);
+    for (VkImageView v : ui_.views) vkDestroyImageView(device, v, nullptr);
+    ui_.fbs.clear();
+    ui_.views.clear();
+    if (ui_.render_pass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device, ui_.render_pass, nullptr);
+        ui_.render_pass = VK_NULL_HANDLE;
+    }
+    ui_.image_count = 0;
+}
+
+void EditorApp::rebuild_ui_after_swapchain_change() {
+    // The ImGui Vulkan backend keeps per-image state sized at Init, and the
+    // render pass depends on the surface format - so on swapchain recreation
+    // the safe lifecycle is: backend down -> resources down -> up -> up.
+    const RawVulkanHandles rh = renderer_->raw_handles();
+    ImGui_ImplVulkan_Shutdown();
+    destroy_ui_swapchain_resources();
+    if (auto r = create_ui_swapchain_resources(); !r.ok()) {
+        IGNIS_ERROR("UI swapchain resource rebuild failed: {}", r.error());
+        return;
+    }
+    ImGui_ImplVulkan_InitInfo info{};
+    info.ApiVersion = VK_API_VERSION_1_3;
+    info.Instance = static_cast<VkInstance>(rh.instance);
+    info.PhysicalDevice = static_cast<VkPhysicalDevice>(rh.physical_device);
+    info.Device = ui_.device;
+    info.QueueFamily = rh.queue_family;
+    info.Queue = ui_.queue;
+    info.DescriptorPool = ui_.pool;
+    info.MinImageCount = 2;
+    info.ImageCount = ui_.image_count;
+    info.UseDynamicRendering = false;
+    info.PipelineInfoMain.RenderPass = ui_.render_pass;
+    info.PipelineInfoMain.Subpass = 0;
+    info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    info.CheckVkResultFn = check_vk;
+    ImGui_ImplVulkan_Init(&info);
+    IGNIS_INFO("editor UI resources rebuilt for {}x{} ({} swapchain images)", ui_.fb_width,
+               ui_.fb_height, ui_.image_count);
+}
+
+void EditorApp::apply_content_scale(f32 scale) {
+    if (scale <= 0.f) scale = 1.f;
+    content_scale_ = scale;
+    // Reset to the pristine style first so repeated DPI changes don't accumulate.
+    ImGui::GetStyle() = base_style_;
+    ImGui::GetStyle().ScaleAllSizes(scale);
+    ImGui::GetIO().FontGlobalScale = scale;
+}
+
+void EditorApp::load_window_settings() {
+    std::ifstream f("editor_window.json");
+    if (!f || !window_ || !window_->handle()) return;
+    try {
+        const auto j = nlohmann::json::parse(f);
+        const int w = j.value("width", 1280);
+        const int h = j.value("height", 720);
+        const bool maximized = j.value("maximized", false);
+        glfwSetWindowSize(window_->handle(), w, h);
+        if (maximized) glfwMaximizeWindow(window_->handle());
+    } catch (const std::exception& e) {
+        IGNIS_WARN("ignoring corrupt editor_window.json: {}", e.what());
+    }
+}
+
+void EditorApp::save_window_settings() const {
+    if (!window_ || !window_->handle()) return;
+    int w = 1280, h = 720;
+    glfwGetWindowSize(window_->handle(), &w, &h);
+    const bool maximized = glfwGetWindowAttrib(window_->handle(), GLFW_MAXIMIZED) == GLFW_TRUE;
+    const nlohmann::json j = {{"width", w}, {"height", h}, {"maximized", maximized}};
+    std::ofstream f("editor_window.json");
+    if (f) f << j.dump(2);
 }
 
 // --- per-component inspector editors (one function per component type) -------
@@ -759,7 +861,7 @@ EntityId EditorApp::create_gameobject(const std::string& kind) {
     EntityId e = w.create_entity(kind);
     w.emplace<TransformComponent>(e);
     if (kind == "Cube") {
-        w.emplace<MeshRendererComponent>(e)->model_path = "assets/cube.gltf";
+        w.emplace<MeshRendererComponent>(e).model_path = "assets/cube.gltf";
     } else if (kind == "Camera") {
         w.emplace<CameraComponent>(e);
     } else if (kind == "Directional Light") {
@@ -854,7 +956,7 @@ void EditorApp::duplicate_entity(EntityId e) {
     EntityId copy = w.create_entity(w.name_of(e) + " copy");
     w.set_parent(copy, w.parent_of(e));
     if (const auto* t = w.get<TransformComponent>(e)) {
-        auto& ct = *w.emplace<TransformComponent>(copy);
+        auto& ct = w.emplace<TransformComponent>(copy);
         ct = *t;
         ct.position.x += 1.f;
     }
@@ -1634,9 +1736,52 @@ void EditorApp::draw_bottom_panel(f32 dt) {
             draw_stats(dt);
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem("Scene")) {
+            item_tooltip("scene-level settings: gravity, time scale, ambient light, clear color");
+            bottom_tab_ = 3;
+            draw_scene_settings();
+            ImGui::EndTabItem();
+        }
         ImGui::EndTabBar();
     }
     ImGui::End();
+}
+
+void EditorApp::draw_scene_settings() {
+    SceneSettings& s = scene_->settings();
+    if (ImGui::DragFloat3("gravity", &s.gravity.x, 0.1f, -100.f, 100.f))
+        physics_->set_gravity(s.gravity); // live: affects a running simulation
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("world gravity, applied live to the physics simulation");
+    ImGui::SliderFloat("time scale", &s.time_scale, 0.f, 4.f); // read in main_loop
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("scales simulation time while playing (0 = frozen); render fps is unaffected");
+    ImGui::ColorEdit3("ambient color", &s.ambient_color.x);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("flat ambient light color (kept separate from IBL environment lighting)");
+    ImGui::DragFloat("ambient intensity", &s.ambient_intensity, 0.01f, 0.f, 10.f);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("strength of the flat ambient light");
+    ImGui::ColorEdit4("clear color (scene default)", &s.clear_color.x);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("scene-level default clear color; the active camera's own clear color overrides it");
+    if (ImGui::Button("Apply clear color to active camera")) {
+        const EntityId cam = find_active_camera();
+        if (cam != NULL_ENTITY) {
+            if (auto* cc = scene_->world().get<CameraComponent>(cam)) cc->clear_color = s.clear_color;
+        } else {
+            IGNIS_WARN("no active camera to apply the clear color to");
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("explicitly copy the scene default clear color into the active camera component");
+    ImGui::Separator();
+    if (ImGui::Button("Reset to defaults")) {
+        s = SceneSettings{};
+        physics_->set_gravity(s.gravity);
+        IGNIS_INFO("scene settings reset to defaults");
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("restore default gravity, time scale, ambient and clear color");
+    ImGui::TextDisabled("saved into the scene JSON (Ctrl+S) and used by the runtime/export");
 }
 
 void EditorApp::draw_status_bar(f32 dt) {
@@ -1771,11 +1916,36 @@ void EditorApp::main_loop() {
         window_->poll_events();
         const f32 dt = window_->delta_time();
 
+        const FramebufferSize fb = window_->framebuffer_size();
+        if (fb.width == 0 || fb.height == 0) continue; // minimized: suspend rendering
+
+        // HiDPI: re-apply the ImGui style/font scale when the content scale
+        // changes (monitor switch, OS zoom). Resets to base_style_ first, so
+        // repeated changes don't accumulate.
+        const ContentScale cs = window_->content_scale();
+        if (std::fabs(cs.x - content_scale_) > 0.01f) apply_content_scale(cs.x);
+
         handle_viewport_input(camera, camEntity, dt);
-        if (playing_) scene_->update(dt);
+        // time_scale affects simulation time only, never the render frame rate
+        if (playing_) scene_->update(dt * scene_->settings().time_scale);
         publish_view_camera(camera, camEntity);
         view_cam_ = camera;
         handle_shortcuts();
+
+        // --- scene render first: a pending resize is processed here (after
+        // waitForIdle, swapchain recreated) before the UI frame starts.
+        renderer_->render(*scene_, camera, dt);
+
+        // If the swapchain was recreated this frame, rebuild the
+        // swapchain-dependent UI resources before starting the ImGui frame.
+        RawVulkanHandles rhNow = renderer_->raw_handles();
+        if (rhNow.windowed &&
+            (rhNow.width != ui_.fb_width || rhNow.height != ui_.fb_height ||
+             rhNow.swap_image_count != ui_.image_count ||
+             rhNow.swap_format != static_cast<i32>(ui_.format))) {
+            rebuild_ui_after_swapchain_change();
+            rhNow = renderer_->raw_handles();
+        }
 
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -1790,7 +1960,6 @@ void EditorApp::main_loop() {
         if (show_statusbar_) draw_status_bar(dt);
         draw_save_as_modal();
         draw_help_window();
-        const FramebufferSize fb = window_->framebuffer_size();
         const f32 aspect = fb.height > 0 ? static_cast<f32>(fb.width) / static_cast<f32>(fb.height) : 1.f;
         draw_viewport_gizmo(camera, aspect);
         draw_view_nav_gizmo(camera, aspect, camEntity);
@@ -1802,11 +1971,14 @@ void EditorApp::main_loop() {
 
         ImGui::Render();
 
-        // --- scene render (no present yet) ----------------------------------------
-        renderer_->render(*scene_, camera, dt);
+        // If render() produced no frame this frame (e.g. swapchain out of date
+        // and recreation pending), skip the overlay + present: presenting a
+        // stale image is what causes visible flicker.
+        if (!renderer_->frame_rendered()) continue;
 
         // --- ImGui overlay pass on the swapchain image ------------------------------
-        const RawVulkanHandles rhNow = renderer_->raw_handles();
+        // (the scene was already rendered above; rhNow reflects the current
+        // swapchain, possibly recreated this frame)
         const u32 swapIndex = rhNow.swap_index;
         VkDevice device = ui_.device;
         vkResetCommandPool(device, ui_.cmd_pool, 0);
@@ -1837,18 +2009,22 @@ void EditorApp::main_loop() {
 
 void EditorApp::shutdown_ui() {
     save_editor_state(); // persist viewport/camera prefs for the next session
-    renderer_->shutdown(); // waits for idle internally
-    ImGui_ImplVulkan_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
-    const VkDevice device = ui_.device;
-    vkDestroyCommandPool(device, ui_.cmd_pool, nullptr);
-    for (u32 i = 0; i < ui_.image_count; ++i) {
-        vkDestroyFramebuffer(device, ui_.fbs[i], nullptr);
-        vkDestroyImageView(device, ui_.views[i], nullptr);
+    save_window_settings();
+    // Lifetime order matters (issue #53): UI Vulkan resources and the ImGui
+    // backend must be destroyed BEFORE the renderer, because the renderer
+    // owns the VkDevice they were created on.
+    if (ImGui::GetCurrentContext()) {
+        ImGui_ImplVulkan_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
     }
-    vkDestroyRenderPass(device, ui_.render_pass, nullptr);
-    vkDestroyDescriptorPool(device, ui_.pool, nullptr);
+    const VkDevice device = ui_.device;
+    if (device != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(device, ui_.cmd_pool, nullptr);
+        destroy_ui_swapchain_resources();
+        vkDestroyDescriptorPool(device, ui_.pool, nullptr);
+    }
+    renderer_->shutdown(); // destroys the device; waits for idle internally
     window_->shutdown();
 }
 

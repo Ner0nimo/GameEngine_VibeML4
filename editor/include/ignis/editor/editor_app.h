@@ -23,6 +23,7 @@
 
 #ifdef IGNIS_WITH_GRAPHICS
 #include <vulkan/vulkan.h>
+#include <imgui.h>
 #endif
 
 namespace ignis {
@@ -72,8 +73,13 @@ private:
         std::vector<VkImageView> views;
         std::vector<VkFramebuffer> fbs;
         u32 image_count = 0;
+        u32 fb_width = 0;   // swapchain extent the views/fbs were built for
+        u32 fb_height = 0;
+        VkFormat format = VK_FORMAT_UNDEFINED;
     };
     UiHandles ui_;
+    ImGuiStyle base_style_{};  // pristine style captured after StyleColorsDark
+    f32 content_scale_ = 1.f;  // last applied DPI content scale
 
     // --- editor UI state ------------------------------------------------------
     std::string scene_path_; // file the current scene is loaded from / saves to
@@ -89,7 +95,7 @@ private:
     bool show_statusbar_ = true;
     bool show_overlay_ = true;  // viewport text overlay
     bool show_help_ = false;
-    int bottom_tab_ = 0; // 0 = console, 1 = assets, 2 = stats
+    int bottom_tab_ = 0; // 0 = console, 1 = assets, 2 = stats, 3 = scene settings
     std::vector<std::pair<LogLevel, std::string>> console_;
     std::mutex console_mutex_;
     char console_filter_[128] = "";
@@ -127,6 +133,17 @@ private:
     void main_loop(); // one frame = input, simulate, UI, render
     void shutdown_ui();
 
+    // Swapchain-dependent UI resources (issue #53): rebuilt whenever the
+    // renderer recreates the swapchain. The ImGui context/GLFW backend and
+    // descriptor/command pools survive; views/framebuffers/render pass and
+    // the ImGui Vulkan backend registration do not.
+    Result<void> create_ui_swapchain_resources();
+    void destroy_ui_swapchain_resources();
+    void rebuild_ui_after_swapchain_change();
+    void apply_content_scale(f32 scale);
+    void load_window_settings();
+    void save_window_settings() const;
+
     // One frame of UI, one function per panel (one level of abstraction).
     EntityId find_active_camera() const;
     void update_camera(Camera& camera, EntityId cam_entity) const;
@@ -160,6 +177,7 @@ private:
     void draw_console_input();
     void draw_asset_browser();
     void draw_stats(f32 dt);
+    void draw_scene_settings();
     void draw_status_bar(f32 dt);
     void draw_viewport_gizmo(const Camera& camera, f32 aspect);
     void draw_view_nav_gizmo(const Camera& camera, f32 aspect, EntityId cam_entity);
