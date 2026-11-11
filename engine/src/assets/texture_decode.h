@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ignis/assets/texture.h"
+#include "ignis/core/result.h"
 
 #include <memory>
 #include <string>
@@ -15,8 +16,8 @@ inline constexpr long long kMaxLdrTexturePixels = 64LL * 1024 * 1024;
 inline constexpr long long kMaxHdrTexturePixels = 16LL * 1024 * 1024;
 
 // Decode an in-memory image (png/jpg via stb_image, or HDR when force_hdr).
-// Returns nullptr on failure. Implemented in asset_manager.cpp.
-std::shared_ptr<Texture> decode_texture_memory(
+// Failure carries the reason. Implemented in asset_manager.cpp.
+Result<std::shared_ptr<Texture>> decode_texture_memory(
     const std::string& name, const std::vector<u8>& bytes, bool force_hdr);
 
 } // namespace ignis

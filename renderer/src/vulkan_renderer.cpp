@@ -1042,8 +1042,13 @@ struct VulkanRenderer::Impl {
         auto it = meshCache.find(path);
         if (it != meshCache.end()) return it->second;
         AssetManager& am = assets ? *assets : ownAssets;
-        auto model = am.load_model(path);
-        if (!model || !model->mesh || model->mesh->primitives.empty()) return nullptr;
+        auto model_r = am.load_model(path);
+        if (!model_r.ok()) {
+            IGNIS_WARN("gpuMesh: {}", model_r.error());
+            return nullptr;
+        }
+        auto& model = model_r.value();
+        if (!model->mesh || model->mesh->primitives.empty()) return nullptr;
 
         std::vector<f32> vertices;
         std::vector<u32> indices;
@@ -1099,8 +1104,12 @@ struct VulkanRenderer::Impl {
         auto it = materialSets.find(key);
         if (it != materialSets.end()) return it->second;
         AssetManager& am = assets ? *assets : ownAssets;
-        auto model = am.load_model(modelPath);
-        if (!model) return nullptr;
+        auto model_r = am.load_model(modelPath);
+        if (!model_r.ok()) {
+            IGNIS_WARN("materialSetFor: {}", model_r.error());
+            return nullptr;
+        }
+        auto& model = model_r.value();
         const Material* mat = matIndex < model->materials.size() ? &model->materials[matIndex] : nullptr;
 
         auto texOf = [&](int idx) -> TextureHandle {
@@ -1295,9 +1304,12 @@ Result<void> VulkanRenderer::set_environment_hdr(const std::string& path) {
         return Result<void>::failure("renderer not initialized");
     auto& I = *impl_;
     AssetManager& am = I.assets ? *I.assets : I.ownAssets;
-    auto hdr = am.load_texture(path);
-    if (!hdr || !hdr->hdr)
-        return Result<void>::failure("cannot load HDR equirect '" + path + "'");
+    auto hdr_r = am.load_texture(path);
+    if (!hdr_r.ok())
+        return Result<void>::failure("cannot load HDR equirect '" + path + "': " + hdr_r.error());
+    auto& hdr = hdr_r.value();
+    if (!hdr->hdr)
+        return Result<void>::failure("'" + path + "' is not an HDR equirect texture");
     const Cubemap cube = equirect_to_irradiance(*hdr, 32, 64);
     const auto prefiltered = equirect_to_prefiltered(*hdr, static_cast<int>(kPrefilterFaceSize),
                                                      static_cast<int>(kEnvMipLevels), 512);
@@ -1736,7 +1748,9 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
                 if (!matSet) continue;
                 // Material params from the model.
                 AssetManager& am = I.assets ? *I.assets : I.ownAssets;
-                auto model = am.load_model(d.modelPath);
+                auto model_r = am.load_model(d.modelPath);
+                if (!model_r.ok()) continue; // gpuMesh already logged the reason
+                auto& model = model_r.value();
                 const Material* mat = prim.materialIndex < model->materials.size()
                                           ? &model->materials[prim.materialIndex] : nullptr;
                 GbufferPush push{};

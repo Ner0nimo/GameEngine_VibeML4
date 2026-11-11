@@ -61,14 +61,15 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     ignis::AssetManager am;
     am.set_access_mode(ignis::AssetAccessMode::ProjectFilesystem);
     am.set_project_root(dir);
-    std::shared_ptr<ignis::Model> model;
+    ignis::Result<std::shared_ptr<ignis::Model>> model_r =
+        ignis::Result<std::shared_ptr<ignis::Model>>::failure("not loaded");
     try {
-        model = am.load_model("model.gltf");
+        model_r = am.load_model("model.gltf");
     } catch (...) {
-        return 1; // loaders must return nullptr, never throw
+        return 1; // loaders must report failure via Result, never throw
     }
-    if (model && model->mesh) {
-        for (const auto& prim : model->mesh->primitives) {
+    if (model_r.ok() && model_r.value()->mesh) {
+        for (const auto& prim : model_r.value()->mesh->primitives) {
             if (!prim.indices.empty() && prim.positions.empty()) return 1;
         }
     }
