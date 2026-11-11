@@ -2,6 +2,7 @@
 
 #include "ignis/core/log.h"
 #include "ignis/core/pak.h"
+#include "texture_decode.h"
 
 #include <stb_image.h>
 
@@ -27,6 +28,19 @@ std::shared_ptr<Texture> AssetManager::load_texture_impl(const std::string& path
     tex->name = path;
 
     const bool is_hdr = path.ends_with(".hdr") || path.ends_with(".HDR");
+    // Reject oversized decoded dimensions before stb allocates the output:
+    // a tiny header can claim gigabytes of pixels.
+    int iw = 0, ih = 0, icomp = 0;
+    if (!stbi_info_from_memory(bytes.data(), static_cast<int>(bytes.size()), &iw, &ih, &icomp)) {
+        IGNIS_ERROR("load_texture: stb_image failed on '{}': {}", path, stbi_failure_reason());
+        return nullptr;
+    }
+    const long long max_pixels = is_hdr ? kMaxHdrTexturePixels : kMaxLdrTexturePixels;
+    if (static_cast<long long>(iw) * static_cast<long long>(ih) > max_pixels) {
+        IGNIS_ERROR("load_texture: '{}' claims {}x{} (over the {} pixel cap)", path, iw, ih,
+                    max_pixels);
+        return nullptr;
+    }
     int w = 0, h = 0, comp = 0;
     if (is_hdr) {
         stbi_set_flip_vertically_on_load(1);

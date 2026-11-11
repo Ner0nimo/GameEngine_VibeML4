@@ -533,3 +533,40 @@ TEST(AssetsMalformed, GlbWithExternalBufferUriRejectedInPackageOnly) {
     EXPECT_EQ(am.load_model("assets/m.glb"), nullptr);
     fs::remove(pak_path);
 }
+
+TEST(AssetsSecurity, HdrHugeDimensionsRejectedBeforeAllocation) {
+    // Valid Radiance header claiming 20000x20000 (= 6.4 GB as f32 RGBA):
+    // the decoded-dimension cap must reject it before any allocation.
+    const auto p = write_tmp_text("ignis_huge.hdr",
+                                  "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 20000 +X 20000\n");
+    AssetManager am;
+    EXPECT_EQ(am.load_texture(p.string()), nullptr);
+    fs::remove(p);
+}
+
+TEST(AssetsSecurity, PngHugeButAllocatableDimensionsRejected) {
+    // 20000x20000 PNG = 1.6 GB RGBA: a naive decoder would allocate it (and
+    // OOM on smaller machines); the cap rejects the header up front.
+    std::vector<u8> png = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    auto be32 = [&](u32 v) {
+        png.push_back(static_cast<u8>(v >> 24));
+        png.push_back(static_cast<u8>(v >> 16));
+        png.push_back(static_cast<u8>(v >> 8));
+        png.push_back(static_cast<u8>(v));
+    };
+    be32(13);
+    const char ihdr[4] = {'I', 'H', 'D', 'R'};
+    png.insert(png.end(), ihdr, ihdr + 4);
+    be32(20000);
+    be32(20000);
+    png.push_back(8);
+    png.push_back(2);
+    png.push_back(0);
+    png.push_back(0);
+    png.push_back(0);
+    be32(0); // crc (stb does not verify)
+    const auto p = write_tmp_bytes("ignis_huge2.png", png);
+    AssetManager am;
+    EXPECT_EQ(am.load_texture(p.string()), nullptr);
+    fs::remove(p);
+}
