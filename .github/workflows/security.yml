@@ -1,9 +1,9 @@
 name: Security CI
 
-# Security regression gates from the red-team review (issue #33):
-# sanitizer test runs, bounded fuzz smoke tests, static analysis and a
-# dependency-pinning audit. PRs get short runs; the nightly schedule runs a
-# longer fuzzing campaign.
+# Security regression gates: sanitizer test runs, bounded fuzz smoke tests
+# over every untrusted-input parser, static analysis, secret scanning,
+# workflow linting, dependency-pinning audits and action-pinning audits.
+# PRs get short runs; the nightly schedule runs a longer fuzzing campaign.
 on:
   push:
     branches: [main]
@@ -18,7 +18,7 @@ on:
       - 'tests/**'
       - 'scenes/**'
       - 'scripts/**'
-      - '.github/workflows/security.yml'
+      - '.github/workflows/**'
       - '.clang-tidy'
   pull_request:
     branches: [main]
@@ -33,12 +33,17 @@ on:
       - 'tests/**'
       - 'scenes/**'
       - 'scripts/**'
-      - '.github/workflows/security.yml'
+      - '.github/workflows/**'
       - '.clang-tidy'
   workflow_dispatch:
   schedule:
     # Nightly longer fuzzing campaign at 03:00 UTC.
     - cron: '0 3 * * *'
+
+# Least privilege: these jobs only read the repo (gitleaks uses the token
+# read-only; SARIF upload happens in codeql.yml with security-events: write).
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -52,8 +57,9 @@ jobs:
   sanitizer-tests:
     name: ASan+UBSan headless build + tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install toolchain
         run: |
           sudo apt-get update
@@ -66,10 +72,11 @@ jobs:
         run: ctest --preset headless-asan --output-on-failure
 
   fuzz:
-    name: Fuzz smoke (pak + scene)
+    name: Fuzz smoke (pak, scene, json, gltf, texture, audio, commands)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install toolchain
         run: |
           sudo apt-get update
@@ -77,33 +84,69 @@ jobs:
       - name: Configure fuzz targets
         run: cmake --preset fuzz
       - name: Build fuzz targets
-        run: cmake --build --preset fuzz -j --target fuzz_pak fuzz_scene
-      - name: Fuzz pak parser
+        run: cmake --build --preset fuzz -j
+      - name: Verify every parser has a fuzz target and corpus (and vice versa)
+        run: |
+          fail=0
+          for dir in tests/fuzz/corpus/*/; do
+            name=$(basename "$dir")
+            if [ ! -x "build/fuzz/tests/fuzz/fuzz_$name" ]; then
+              echo "MISSING fuzz target for corpus '$name' (expected build/fuzz/tests/fuzz/fuzz_$name)"
+              fail=1
+            fi
+            if [ -z "$(ls -A "$dir")" ]; then
+              echo "EMPTY corpus dir: $dir"
+              fail=1
+            fi
+          done
+          for src in tests/fuzz/fuzz_*.cpp; do
+            name=$(basename "$src" .cpp); name=${name#fuzz_}
+            if [ ! -d "tests/fuzz/corpus/$name" ]; then
+              echo "MISSING corpus dir for target '$name' (expected tests/fuzz/corpus/$name/)"
+              fail=1
+            fi
+          done
+          if [ $fail -eq 0 ]; then echo "all fuzz targets have corpus dirs and vice versa"; fi
+          exit $fail
+      - name: Fuzz every untrusted-input parser
         run: |
           mkdir -p /tmp/fuzz-artifacts
-          ./build/fuzz/tests/fuzz/fuzz_pak \
-            -max_total_time=${{ env.FUZZ_SECONDS }} -max_len=4194304 -rss_limit_mb=2560 \
-            -artifact_prefix=/tmp/fuzz-artifacts/ \
-            tests/fuzz/corpus/pak
-      - name: Fuzz scene parser
-        run: |
-          ./build/fuzz/tests/fuzz/fuzz_scene \
-            -max_total_time=${{ env.FUZZ_SECONDS }} -max_len=1048576 -rss_limit_mb=2560 \
-            -artifact_prefix=/tmp/fuzz-artifacts/ \
-            tests/fuzz/corpus/scene
+          for t in pak scene json gltf texture audio commands; do
+            case $t in
+              pak) max_len=4194304 ;;
+              *)   max_len=1048576 ;;
+            esac
+            echo "== fuzz_$t (max_total_time=${{ env.FUZZ_SECONDS }}s, max_len=$max_len)"
+            # libFuzzer writes newly discovered inputs into the checked-out
+            # corpus dir (never commit them from a PR run) and
+            # -print_final_stats logs coverage stats for growth tracking.
+            ./build/fuzz/tests/fuzz/fuzz_$t \
+              -max_total_time=${{ env.FUZZ_SECONDS }} -max_len=$max_len -rss_limit_mb=2560 \
+              -print_final_stats=1 \
+              -artifact_prefix=/tmp/fuzz-artifacts/ \
+              tests/fuzz/corpus/$t || exit 1
+          done
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fuzz-crash-artifacts
           path: /tmp/fuzz-artifacts/
+          retention-days: 30
+      - name: Upload grown corpus from nightly campaign (merge back to grow seeds)
+        if: github.event_name == 'schedule'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-corpus-update
+          path: tests/fuzz/corpus/
           retention-days: 30
 
   clang-tidy:
     name: clang-tidy static analysis (security checks)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install toolchain
         run: |
           sudo apt-get update
@@ -114,28 +157,104 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug -DIGNIS_WITH_GRAPHICS=OFF \
             -DIGNIS_BUILD_EDITOR=OFF -DIGNIS_BUILD_TESTS=ON -DIGNIS_BUILD_EXPORTER=ON \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-      - name: Run clang-tidy on Ignis sources
+      - name: Run clang-tidy on Ignis sources and tests
         run: |
           run-clang-tidy -p build/tidy \
             -clang-tidy-binary clang-tidy \
             -header-filter '^(engine|scripting|physics|audio|runtime|window|renderer|editor|tools|tests)/.*' \
-            engine/src scripting/src physics/src audio/src runtime/src tools/exporter/src
+            engine/src scripting/src physics/src audio/src runtime/src tools/exporter/src tests/src
+
+  secrets:
+    name: Secret scan (gitleaks, full history)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # scan the full history, not just the PR diff
+      - name: Run gitleaks
+        # gitleaks-action v2 is free for personal accounts; if this repo ever
+        # moves under an org, set GITLEAKS_LICENSE here.
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  workflow-lint:
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Lint all workflows
+        uses: rhysd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+
+  actions-pin-audit:
+    name: Audit that every workflow action is SHA-pinned
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify all 'uses:' refs (step-level AND job-level) are pinned to a 40-hex commit SHA
+        run: |
+          python3 - <<'EOF'
+          import glob, re, sys
+          bad = []
+          files = sorted(glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml'))
+          for f in files:
+              for n, line in enumerate(open(f), 1):
+                  # matches both step-level ("- uses: ...") and job-level
+                  # reusable workflow calls ("uses: owner/repo/wf.yml@sha")
+                  m = re.search(r'^\s*(?:-\s*)?uses:\s*([^\s#]+)', line)
+                  if not m:
+                      continue
+                  ref = m.group(1)
+                  if ref.startswith(('./', 'docker://')):
+                      continue
+                  name, sep, at = ref.partition('@')
+                  if not sep or not re.fullmatch(r'[0-9a-f]{40}', at):
+                      bad.append(f'{f}:{n}: {ref}')
+          if bad:
+              print('UNPINNED ACTIONS (must be name@<40-hex commit SHA>):')
+              print('\n'.join(bad))
+              sys.exit(1)
+          print(f'all step- and job-level actions across {len(files)} workflow files are SHA-pinned')
+          EOF
 
   dep-pin-audit:
     name: FetchContent pinning audit (cmake/Dependencies.cmake)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # AGENTS.md: deps are pinned via FetchContent GIT_TAG, never branches.
-      - name: Verify every FetchContent dependency is pinned to a GIT_TAG (tag/commit, never a branch)
+      # Require an immutable 40-hex commit SHA (not a moving tag), an
+      # https:// GIT_REPOSITORY (no plain http), and literal values with no
+      # variable expansion (the audit is regex-based by design; the allowed
+      # declaration format is documented in cmake/Dependencies.cmake).
+      - name: Verify every FetchContent dependency is pinned to a commit SHA over https
         run: |
           python3 - <<'EOF'
           import re, sys
           text = open('cmake/Dependencies.cmake').read()
           blocks = re.findall(r'FetchContent_Declare\(\s*(\w+)(.*?)\)', text, re.S)
-          unpinned = [name for name, body in blocks if 'GIT_TAG' not in body]
-          if unpinned:
-              print('UNPINNED DEPENDENCIES (need GIT_TAG):', ', '.join(unpinned))
+          problems = []
+          for name, body in blocks:
+              tags = [t.split('#')[0].strip() for t in re.findall(r'GIT_TAG\s+(\S+)', body)]
+              repos = [r.strip('"') for r in re.findall(r'GIT_REPOSITORY\s+(\S+)', body)]
+              if not tags:
+                  problems.append(f'{name}: missing GIT_TAG')
+              for t in tags:
+                  if '${' in t or '$(' in t:
+                      problems.append(f'{name}: GIT_TAG uses variable expansion: {t!r} (use a literal SHA)')
+                  elif not re.fullmatch(r'[0-9a-f]{40}', t):
+                      problems.append(f'{name}: GIT_TAG {t!r} is not an immutable 40-hex commit SHA')
+              for r in repos:
+                  if '${' in r or '$(' in r:
+                      problems.append(f'{name}: GIT_REPOSITORY uses variable expansion: {r!r}')
+                  elif not r.startswith('https://'):
+                      problems.append(f'{name}: GIT_REPOSITORY {r!r} is not https')
+          if problems:
+              print('\n'.join(problems))
               sys.exit(1)
-          print(f'all {len(blocks)} FetchContent dependencies are pinned')
+          print(f'all {len(blocks)} FetchContent dependencies pinned to https + literal commit SHA')
           EOF

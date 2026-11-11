@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Keep GitHub Actions (pinned by SHA in the workflows) up to date.
+  # Dependabot rewrites the pinned SHA to the new release's commit.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"

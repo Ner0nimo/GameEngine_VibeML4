@@ -41,12 +41,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: CI only needs to read the repo.
+permissions:
+  contents: read
+
 jobs:
   headless:
     name: Headless build + tests (no GPU)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install toolchain
         run: |
           sudo apt-get update
@@ -57,6 +62,8 @@ jobs:
         run: cmake --build --preset headless -j
       - name: Test
         run: ctest --preset headless --output-on-failure
+      - name: Graphics TU syntax check (window/renderer/editor compile under -Werror)
+        run: scripts/syntax_check_graphics.sh
       - name: Runtime smoke test (feature scene, headless)
         run: |
           ./build/headless/runtime/ignis_runtime --headless --frames 300 \
@@ -72,8 +79,9 @@ jobs:
   full:
     name: Full build with editor + Vulkan (compile/link)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install toolchain + graphics deps
         run: |
           sudo apt-get update

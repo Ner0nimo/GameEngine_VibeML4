@@ -5,6 +5,13 @@
 #    Ignis modules compile everywhere (including headless CI machines).
 #  - GLFW / NVRHI / ImGui *libraries* are only built when IGNIS_WITH_GRAPHICS=ON
 #    (they need X11/Wayland dev packages and a Vulkan SDK on the host).
+#
+# DECLARATION FORMAT (enforced by the dep-pin-audit job in
+# .github/workflows/security.yml): every FetchContent_Declare must use
+# literal values on their own lines —
+#     GIT_REPOSITORY https://github.com/<org>/<repo>.git
+#     GIT_TAG <40-hex commit SHA>
+# No variables, no moving tags, no branch names, no plain http.
 
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)

@@ -7,6 +7,7 @@
 
 #include <fstream>
 #include <iterator>
+#include <new>
 
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
@@ -31,27 +32,50 @@ static bool decode_impl(const ma_decoder_config* cfg_hint, const char* path,
     }
     if (res != MA_SUCCESS) return false;
 
-    ma_uint64 total_frames = 0;
-    ma_decoder_get_length_in_pcm_frames(&decoder, &total_frames);
-    if (total_frames == 0) {
-        ma_decoder_uninit(&decoder);
+    // RAII: the decoder is uninitialized exactly once on every exit path.
+    struct DecoderGuard {
+        ma_decoder* d;
+        ~DecoderGuard() { ma_decoder_uninit(d); }
+    } guard{&decoder};
+
+    // The whole decode is inside one allocation-exception boundary: decode
+    // helpers return false on any failure and never let bad_alloc escape.
+    try {
+        ma_uint64 total_frames = 0;
+        ma_decoder_get_length_in_pcm_frames(&decoder, &total_frames);
+        if (total_frames == 0) return false;
+        // A malformed container header (e.g. a FLAC STREAMINFO total-samples
+        // field) can claim an enormous length. kMaxDecodedSamples caps the
+        // TOTAL decoded output (peak memory stays at one buffer of at most
+        // 256 MiB of f32; the result is moved, not copied).
+        constexpr ma_uint64 kMaxDecodedSamples = 64ull * 1024 * 1024; // 256 MiB of f32
+        const ma_uint64 channels64 = decoder.outputChannels == 0 ? 1 : decoder.outputChannels;
+        if (total_frames > kMaxDecodedSamples / channels64) {
+            IGNIS_WARN("decode: claimed {} frames exceeds the {} sample cap", total_frames,
+                       kMaxDecodedSamples);
+            return false;
+        }
+        const size_t total_samples =
+            static_cast<size_t>(total_frames) * static_cast<size_t>(decoder.outputChannels);
+        std::vector<f32> buffer(total_samples);
+
+        ma_uint64 read_frames = 0;
+        res = ma_decoder_read_pcm_frames(&decoder, buffer.data(), total_frames, &read_frames);
+        const u32 out_channels = decoder.outputChannels;
+        const u32 out_sample_rate = decoder.outputSampleRate;
+        if (res != MA_SUCCESS || read_frames == 0) return false;
+
+        const size_t n = static_cast<size_t>(read_frames) * static_cast<size_t>(out_channels);
+        buffer.resize(n); // shrink in place to what was actually decoded
+        out.channels = out_channels;
+        out.sample_rate = out_sample_rate;
+        out.frames = read_frames;
+        out.samples = std::move(buffer); // move: no second large allocation
+        return true;
+    } catch (const std::exception& e) {
+        IGNIS_WARN("decode: failed with exception: {}", e.what());
         return false;
     }
-    const size_t total_samples = static_cast<size_t>(total_frames) * static_cast<size_t>(decoder.outputChannels);
-    std::vector<f32> buffer(total_samples);
-    ma_uint64 read_frames = 0;
-    res = ma_decoder_read_pcm_frames(&decoder, buffer.data(), total_frames, &read_frames);
-    const u32 out_channels = decoder.outputChannels;
-    const u32 out_sample_rate = decoder.outputSampleRate;
-    ma_decoder_uninit(&decoder);
-    if (res != MA_SUCCESS || read_frames == 0) return false;
-
-    out.channels = out_channels;
-    out.sample_rate = out_sample_rate;
-    out.frames = read_frames;
-    const size_t n = static_cast<size_t>(read_frames) * static_cast<size_t>(out.channels);
-    out.samples.assign(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(n));
-    return true;
 }
 
 bool decode_audio_file(const std::string& path, DecodedAudio& out) {

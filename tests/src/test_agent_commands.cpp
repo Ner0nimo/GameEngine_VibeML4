@@ -263,3 +263,39 @@ TEST(AgentSecurity, RunCommandsRecursionIsRejected) {
     EXPECT_EQ(chained, 8u) << "depth guard must cap nesting at 8";
     fs::remove_all(dir);
 }
+
+TEST(AgentCommands, NonObjectCommandsFailControlled) {
+    Scene scene("nonobj");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    CommandProcessor proc(scene, assets);
+    EXPECT_FALSE(proc.execute(nlohmann::json::array({1, 2})).ok);
+    EXPECT_FALSE(proc.execute(nlohmann::json("str")).ok);
+    EXPECT_FALSE(proc.execute(nlohmann::json(42)).ok);
+    EXPECT_FALSE(proc.execute(nlohmann::json::object()).ok); // missing 'cmd'
+    EXPECT_FALSE(proc.execute({{"cmd", 42}}).ok);             // 'cmd' not a string
+    EXPECT_EQ(scene.world().entity_count(), 0u);
+}
+
+TEST(AgentCommands, JsonlNonObjectLinesFailOthersContinue) {
+    Scene scene("jsonl2");
+    register_builtin_components(scene.world());
+    AssetManager assets;
+    CommandProcessor proc(scene, assets);
+    const auto path = std::filesystem::temp_directory_path() / "ignis_cmds2.jsonl";
+    {
+        std::ofstream f(path);
+        f << R"({"cmd": "create_entity", "name": "a"})" "\n";
+        f << "[1,2]\n";
+        f << "42\n";
+        f << R"({"cmd": "create_entity", "name": "b"})" "\n";
+    }
+    auto results = proc.execute_file(path.string());
+    ASSERT_EQ(results.size(), 4u);
+    EXPECT_TRUE(results[0].ok);
+    EXPECT_FALSE(results[1].ok);
+    EXPECT_FALSE(results[2].ok);
+    EXPECT_TRUE(results[3].ok);
+    EXPECT_EQ(scene.world().entity_count(), 2u);
+    std::filesystem::remove(path);
+}

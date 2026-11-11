@@ -5,7 +5,9 @@
 
 #include <cgltf.h>
 
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 
 namespace ignis {
@@ -26,35 +28,10 @@ std::vector<float> read_accessor_floats(const cgltf_accessor* acc) {
     return out;
 }
 
-} // namespace
-
-std::shared_ptr<Model> AssetManager::load_model_impl(const std::string& path) {
-    auto bytes_r = read_file(path);
-    if (!bytes_r.ok()) {
-        IGNIS_ERROR("load_model: {}", bytes_r.error());
-        return nullptr;
-    }
-    const std::vector<u8>& bytes = bytes_r.value();
-
-    cgltf_options options{};
-    std::memset(&options, 0, sizeof(options));
-    cgltf_data* data = nullptr;
-    cgltf_result result = cgltf_parse(&options, bytes.data(), bytes.size(), &data);
-    if (result != cgltf_result_success) {
-        IGNIS_ERROR("load_model: cgltf_parse failed on '{}' ({})", path, static_cast<int>(result));
-        return nullptr;
-    }
-    result = cgltf_load_buffers(&options, data, path.c_str());
-    if (result != cgltf_result_success) {
-        IGNIS_ERROR("load_model: cgltf_load_buffers failed on '{}' ({})", path, static_cast<int>(result));
-        cgltf_free(data);
-        return nullptr;
-    }
-    result = cgltf_validate(data);
-    if (result != cgltf_result_success) {
-        IGNIS_WARN("load_model: cgltf_validate reported issues on '{}' ({})", path, static_cast<int>(result));
-    }
-
+// Builds the engine Model from a parsed, buffer-loaded, validated cgltf
+// document. May throw (read_accessor_floats); load_model_impl contains that.
+std::shared_ptr<Model> build_model(const cgltf_data* data, const std::string& path,
+                                    AssetManager& assets) {
     auto model = std::make_shared<Model>();
     model->mesh = std::make_shared<Mesh>();
     model->mesh->name = path;
@@ -79,7 +56,7 @@ std::shared_ptr<Model> AssetManager::load_model_impl(const std::string& path) {
             std::string dir = path;
             const auto pos = dir.find_last_of("/\\");
             dir = (pos == std::string::npos) ? "" : dir.substr(0, pos + 1);
-            tex = load_texture(dir + img.uri);
+            tex = assets.load_texture(dir + img.uri);
         }
         model->textures.push_back(tex ? tex : std::make_shared<Texture>());
     }
@@ -209,8 +186,124 @@ std::shared_ptr<Model> AssetManager::load_model_impl(const std::string& path) {
         }
     }
 
-    cgltf_free(data);
     return model;
+}
+
+} // namespace
+
+std::shared_ptr<Model> AssetManager::load_model_impl(const std::string& path) {
+    // The whole loading lifecycle (read, parse, buffer IO, validate, build) is
+    // inside one exception boundary: per the AssetManager contract, loaders
+    // never throw — every failure is reported as nullptr with a logged reason.
+    try {
+        auto bytes_r = read_file(path);
+        if (!bytes_r.ok()) {
+            IGNIS_ERROR("load_model: {}", bytes_r.error());
+            return nullptr;
+        }
+        const std::vector<u8>& bytes = bytes_r.value();
+
+        // Resource limits, applied before any allocation driven by declared
+        // (attacker-controlled) sizes inside the document.
+        constexpr size_t kMaxModelBytes = 256ull << 20;      // glTF/GLB document
+        constexpr cgltf_size kMaxBuffers = 1024;
+        constexpr cgltf_size kMaxImages = 1024;
+        constexpr cgltf_size kMaxBufferViews = 65536;
+        constexpr cgltf_size kMaxAccessors = 65536;
+        constexpr cgltf_size kMaxMeshes = 4096;
+        constexpr cgltf_size kMaxSingleBufferBytes = 256ull << 20;
+        constexpr cgltf_size kMaxTotalBufferBytes = 512ull << 20;
+        if (bytes.size() > kMaxModelBytes) {
+            IGNIS_ERROR("load_model: '{}' too large ({} bytes)", path, bytes.size());
+            return nullptr;
+        }
+
+        cgltf_options options{};
+        std::memset(&options, 0, sizeof(options));
+        cgltf_data* raw = nullptr;
+        cgltf_result result = cgltf_parse(&options, bytes.data(), bytes.size(), &raw);
+        if (result != cgltf_result_success) {
+            IGNIS_ERROR("load_model: cgltf_parse failed on '{}' ({})", path, static_cast<int>(result));
+            return nullptr;
+        }
+        // RAII: the cgltf document is freed exactly once on every exit path.
+        std::unique_ptr<cgltf_data, void (*)(cgltf_data*)> data(raw, &cgltf_free);
+
+        if (data->buffers_count > kMaxBuffers || data->images_count > kMaxImages ||
+            data->buffer_views_count > kMaxBufferViews || data->accessors_count > kMaxAccessors ||
+            data->meshes_count > kMaxMeshes) {
+            IGNIS_ERROR("load_model: too many objects in '{}' (buffers={} images={} views={} accessors={} meshes={})",
+                        path, data->buffers_count, data->images_count, data->buffer_views_count,
+                        data->accessors_count, data->meshes_count);
+            return nullptr;
+        }
+        cgltf_size total_buffer_bytes = 0;
+        for (size_t i = 0; i < data->buffers_count; ++i) {
+            const cgltf_size bsize = data->buffers[i].size;
+            if (bsize > kMaxSingleBufferBytes) {
+                IGNIS_ERROR("load_model: buffer {} of '{}' claims {} bytes (max {})",
+                            i, path, bsize, kMaxSingleBufferBytes);
+                return nullptr;
+            }
+            total_buffer_bytes += bsize;
+            if (total_buffer_bytes > kMaxTotalBufferBytes) {
+                IGNIS_ERROR("load_model: aggregate buffer size of '{}' exceeds {} bytes",
+                            path, kMaxTotalBufferBytes);
+                return nullptr;
+            }
+        }
+
+        // Non-editor access modes must not let cgltf open host files for external
+        // buffer URIs (that would bypass the pak/project-root boundary): resolve
+        // them through read_file and preset the buffer data, so cgltf_load_buffers
+        // skips its own FILE* loading for those buffers.
+        if (mode_ != AssetAccessMode::EditorFilesystem) {
+            std::string dir = path;
+            const auto pos = dir.find_last_of("/\\");
+            dir = (pos == std::string::npos) ? "" : dir.substr(0, pos + 1);
+            for (size_t i = 0; i < data->buffers_count; ++i) {
+                cgltf_buffer& buf = data->buffers[i];
+                if (buf.data != nullptr || buf.uri == nullptr ||
+                    std::strncmp(buf.uri, "data:", 5) == 0)
+                    continue;
+                std::string uri = buf.uri;
+                static_cast<void>(cgltf_decode_uri(uri.data()));
+                auto buf_bytes = read_file(dir + uri);
+                if (!buf_bytes.ok()) {
+                    IGNIS_ERROR("load_model: buffer '{}' rejected on '{}': {}", uri, path,
+                                buf_bytes.error());
+                    return nullptr;
+                }
+                void* copy = std::malloc(buf_bytes.value().size());
+                if (copy == nullptr) {
+                    IGNIS_ERROR("load_model: out of memory loading buffer '{}' on '{}'", uri, path);
+                    return nullptr;
+                }
+                std::memcpy(copy, buf_bytes.value().data(), buf_bytes.value().size());
+                buf.data = copy;
+                buf.size = static_cast<cgltf_size>(buf_bytes.value().size());
+                buf.data_free_method = cgltf_data_free_method_memory_free;
+            }
+        }
+
+        result = cgltf_load_buffers(&options, data.get(), path.c_str());
+        if (result != cgltf_result_success) {
+            IGNIS_ERROR("load_model: cgltf_load_buffers failed on '{}' ({})", path, static_cast<int>(result));
+            return nullptr;
+        }
+        // Reject models that fail validation: cgltf_accessor_unpack_floats performs
+        // unchecked reads, so out-of-range buffer views/accessors must never reach it.
+        result = cgltf_validate(data.get());
+        if (result != cgltf_result_success) {
+            IGNIS_ERROR("load_model: cgltf_validate failed on '{}' ({})", path, static_cast<int>(result));
+            return nullptr;
+        }
+
+        return build_model(data.get(), path, *this);
+    } catch (const std::exception& e) {
+        IGNIS_ERROR("load_model: failed to load '{}': {}", path, e.what());
+        return nullptr;
+    }
 }
 
 std::shared_ptr<Model> AssetManager::load_model(const std::string& path) {

@@ -1,0 +1,16 @@
+# Owner review is required only for security-sensitive and infrastructure
+# paths, so general engine PRs are not blocked on a single reviewer as
+# multi-agent development expands.
+
+# CI and dependency infrastructure
+.github/workflows/ @Ner0nimo
+.github/dependabot.yml @Ner0nimo
+.github/PULL_REQUEST_TEMPLATE.md @Ner0nimo
+cmake/Dependencies.cmake @Ner0nimo
+
+# Security-critical parsers and command surfaces
+engine/src/core/ @Ner0nimo      # pak format, path safety, bounded JSON
+engine/src/assets/ @Ner0nimo    # glTF/texture loaders
+engine/src/agent/ @Ner0nimo     # agent JSON command API
+audio/src/ @Ner0nimo            # audio decoders
+tests/fuzz/ @Ner0nimo           # fuzz harnesses
