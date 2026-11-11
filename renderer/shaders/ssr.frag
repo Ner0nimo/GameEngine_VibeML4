@@ -71,8 +71,6 @@ void main() {
     // changing the crossing/refine/blend logic.)
     float prevT = t0;
     float prevDiff = 1e9;
-    float minAbsDiff = 1e9; // DEBUG
-    int stepsDone = 0;     // DEBUG
     float hitT = -1.0;
     vec2 hitUV = vec2(0.0);
     for (int i = 0; i < STEPS; ++i) {
@@ -82,8 +80,6 @@ void main() {
         if (!project(p, uv)) break;
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break; // off-screen
         float diff = rayDiff(p, uv);
-        minAbsDiff = min(minAbsDiff, abs(diff)); // DEBUG
-        ++stepsDone; // DEBUG
         // i > 0: the first sample sits on the source surface itself (self-crossing).
         // Hit on a sign change (in-front -> behind) OR when a sample lands within
         // the thickness band of the surface (robust for thick occluders at coarse
@@ -104,11 +100,7 @@ void main() {
         prevT = tt;
         prevDiff = diff;
     }
-    if (hitT < 0.0) {
-        // DEBUG: R = hit(0), G = completed all steps, B = minAbsDiff < thickness
-        rt_ssr = vec4(0.0, stepsDone == STEPS ? 1.0 : 0.0, minAbsDiff < THICKNESS ? 1.0 : 0.0, 1.0);
-        return;
-    }
+    if (hitT < 0.0) { rt_ssr = vec4(0.0); return; }
 
     // Confidence: screen-edge fade, ray-length fade, grazing-angle fade.
     float edge = smoothstep(0.0, 0.05, min(min(hitUV.x, 1.0 - hitUV.x), min(hitUV.y, 1.0 - hitUV.y)));
@@ -116,5 +108,5 @@ void main() {
     float confidence = edge * rayFade * NdotV;
 
     vec3 refl = texture(sampler2D(tex_hdr_prev, samp_hdr_prev), hitUV).rgb;
-    rt_ssr = vec4(1.0, 1.0, 1.0, 1.0); // DEBUG: hit
+    rt_ssr = vec4(refl, confidence);
 }
