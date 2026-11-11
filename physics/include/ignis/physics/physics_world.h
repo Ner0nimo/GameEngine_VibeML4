@@ -159,7 +159,6 @@ private:
     void sync_bodies(World& world);
     void sync_transforms(World& world);
 
-    Scene* scene_ = nullptr;
     reactphysics3d::PhysicsCommon* common_ = nullptr;
     reactphysics3d::PhysicsWorld* world_ = nullptr;
     class CollisionListener* listener_ = nullptr;
