@@ -3,6 +3,7 @@
 #include "ignis/core/json_parse.h"
 #include "ignis/core/log.h"
 #include "ignis/ecs/component_registry.h"
+#include "ignis/ecs/subtree.h"
 
 #include <algorithm>
 #include <fstream>
@@ -65,6 +66,10 @@ EntityId Scene::spawn_prefab(const std::string& name) {
         return NULL_ENTITY;
     }
     const nlohmann::json& tpl = it->second;
+    // Prefabs saved from an entity subtree carry "children": spawn the whole
+    // subtree (fresh ids, entity refs remapped) instead of a single entity.
+    if (tpl.contains("children") && tpl["children"].is_array() && !tpl["children"].empty())
+        return spawn_subtree(world_, tpl);
     EntityId e = world_.create_entity(tpl.value("name", name));
     if (tpl.contains("components") && tpl["components"].is_object()) {
         for (auto& [comp_name, comp_json] : tpl["components"].items()) {

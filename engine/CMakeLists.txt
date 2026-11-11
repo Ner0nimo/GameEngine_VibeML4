@@ -2,6 +2,7 @@ set(IGNIS_CORE_SOURCES
     src/core/log.cpp
     src/core/pak.cpp
     src/ecs/world.cpp
+    src/ecs/subtree.cpp
     src/scene/scene.cpp
     src/scene/history.cpp
     src/assets/asset_manager.cpp

@@ -7,6 +7,7 @@
 #include "ignis/core/log.h"
 #include "ignis/core/result.h"
 #include "ignis/core/types.h"
+#include "ignis/ecs/component_registry.h"
 #include "ignis/ecs/entity.h"
 #include "ignis/physics/physics_world.h"
 #include "ignis/renderer/vulkan_renderer.h"
@@ -106,6 +107,8 @@ private:
     std::string selected_asset_;
     EntityId rename_target_ = NULL_ENTITY;
     char rename_buf_[128] = "";
+    EntityId prefab_save_target_ = NULL_ENTITY; // "Save as prefab" modal
+    char prefab_name_buf_[128] = "";
     char hierarchy_filter_[128] = "";
     bool save_as_open_ = false;
     char save_as_buf_[256] = "";
@@ -224,6 +227,14 @@ private:
     void marquee_select(const picking::ScreenRect& rect, bool add, bool remove);
     void delete_selected();
     void duplicate_selected();
+    // clipboard (entity subtrees / single components) + prefab save
+    std::vector<EntityId> selection_roots() const;
+    void copy_selection_to_clipboard();
+    void paste_clipboard_entities();
+    void copy_component(const ComponentTypeInfo* info);
+    void paste_component(const ComponentTypeInfo* info);
+    void reset_component(const ComponentTypeInfo* info);
+    void draw_prefab_modal();
 #endif
 };
 
