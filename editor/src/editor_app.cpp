@@ -1081,6 +1081,13 @@ void EditorApp::marquee_select(const picking::ScreenRect& rect, bool add, bool r
         if (picking::rects_intersect(rect, r)) hits.push_back(e);
     }
     if (!add && !remove) {
+        // Deterministic primary: last hit in tree order (not iteration order).
+        const std::vector<EntityId> order = tree_order();
+        std::sort(hits.begin(), hits.end(), [&](EntityId a, EntityId b) {
+            const auto ia = std::find(order.begin(), order.end(), a);
+            const auto ib = std::find(order.begin(), order.end(), b);
+            return ia < ib;
+        });
         selection_ = hits;
         selected_ = hits.empty() ? NULL_ENTITY : hits.back();
     } else if (add) {
@@ -1139,10 +1146,8 @@ void EditorApp::duplicate_entity(EntityId e) {
 // selection.
 void EditorApp::duplicate_selected() {
     if (selection_.empty()) return;
-    if (selection_.size() == 1) {
-        duplicate_entity(selection_.front());
-        return;
-    }
+    // One semantic for 1..N selected: the copies JOIN the selection and the
+    // last copy becomes primary (no special-casing of the single case).
     const std::vector<EntityId> targets = selection_;
     history_->begin("duplicate " + std::to_string(targets.size()) + " entities");
     World& w = scene_->world();
