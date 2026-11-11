@@ -105,8 +105,8 @@ void main() {
     // Confidence: screen-edge fade, ray-length fade, grazing-angle fade.
     float edge = smoothstep(0.0, 0.05, min(min(hitUV.x, 1.0 - hitUV.x), min(hitUV.y, 1.0 - hitUV.y)));
     float rayFade = clamp(1.0 - hitT / tMax, 0.0, 1.0);
-    float confidence = edge * rayFade * NdotV * ubo.params.y; // y = strength
+    float confidence = edge * rayFade * ubo.params.y; // y = strength (grazing handled by the Rv.z gate)
 
     vec3 refl = texture(sampler2D(tex_hdr_prev, samp_hdr_prev), hitUV).rgb;
-    rt_ssr = vec4(vec3(confidence), confidence); // DEBUG: real confidence
+    rt_ssr = vec4(refl, confidence);
 }
