@@ -20,6 +20,7 @@
 
 #include <GLFW/glfw3.h>
 #include <imgui.h>
+#include <imgui_internal.h> // DockBuilder API (docking branch), for the default workspace layout
 #include <ImGuizmo.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
@@ -202,6 +203,9 @@ Result<void> EditorApp::init_imgui_ui() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable; // #56: dockable panels
+    io.IniFilename = "editor_layout.ini"; // dock layout persists across sessions
+    apply_default_layout_ = !std::filesystem::exists(io.IniFilename);
     ImGui::StyleColorsDark();
     base_style_ = ImGui::GetStyle(); // pristine copy for DPI re-scaling
     apply_content_scale(window_->content_scale().x);
@@ -1392,6 +1396,12 @@ void EditorApp::draw_menu_bar() {
         item_tooltip("show/hide the status bar at the bottom");
         ImGui::MenuItem("Viewport overlay", nullptr, &show_overlay_);
         item_tooltip("show/hide the scene/camera/selection overlay drawn on the viewport");
+        if (ImGui::MenuItem("Reset dock layout")) {
+            std::filesystem::remove("editor_layout.ini");
+            apply_default_layout_ = true; // rebuilt from the default on the next frame
+            ImGui::MarkIniSettingsDirty();
+        }
+        item_tooltip("restore the default docked workspace layout");
         ImGui::Separator();
         const bool t_colliders = ImGui::MenuItem("Colliders", nullptr, &dbg_colliders_);
         item_tooltip("draw collider wireframes (color = rigid-body type: static grey, kinematic yellow, dynamic green)");
@@ -1547,7 +1557,7 @@ void EditorApp::draw_toolbar() {
     ImGui::Begin("##toolbar", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
-                     ImGuiWindowFlags_NoSavedSettings);
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking);
     auto mode_button = [&](const char* label, const char* tip, GizmoOp op) {
         const bool active = gizmo_op_ == op;
         if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
@@ -2170,7 +2180,7 @@ void EditorApp::draw_status_bar(f32 dt) {
     ImGui::Begin("##statusbar", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
-                     ImGuiWindowFlags_NoSavedSettings);
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking);
     const RenderStats st = renderer_->stats();
     const char* gizmo_name = gizmo_op_ == GizmoOp::Translate ? "Translate"
                            : gizmo_op_ == GizmoOp::Rotate ? "Rotate" : "Scale";
@@ -2347,6 +2357,23 @@ std::vector<DebugLine> EditorApp::build_debug_lines() {
     return out;
 }
 
+// Default workspace: Hierarchy docked left, Inspector right, Bottom panel at
+// the bottom; the center stays the 3D viewport. Applied once when no saved
+// layout exists (or after View > Reset dock layout).
+void EditorApp::build_default_dock_layout(u32 dockspace_id) {
+    ImGui::DockBuilderRemoveNode(dockspace_id);
+    ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->Size);
+    ImGuiID main = dockspace_id;
+    const ImGuiID left = ImGui::DockBuilderSplitNode(main, ImGuiDir_Left, 0.22f, nullptr, &main);
+    const ImGuiID right = ImGui::DockBuilderSplitNode(main, ImGuiDir_Right, 0.25f, nullptr, &main);
+    const ImGuiID bottom = ImGui::DockBuilderSplitNode(main, ImGuiDir_Down, 0.30f, nullptr, &main);
+    ImGui::DockBuilderDockWindow("Hierarchy", left);
+    ImGui::DockBuilderDockWindow("Inspector", right);
+    ImGui::DockBuilderDockWindow("Bottom", bottom);
+    ImGui::DockBuilderFinish(main);
+}
+
 void EditorApp::main_loop() {
     ImGuiIO& io = ImGui::GetIO();
     (void)io;
@@ -2407,6 +2434,15 @@ void EditorApp::main_loop() {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         ImGuizmo::BeginFrame(); // must come after ImGui::NewFrame: it calls ImGui::Begin internally
+
+        // Docking workspace covering the main viewport (#56). The central node
+        // is passthrough so the 3D scene shows through and stays clickable.
+        const ImGuiID dockspace =
+            ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
+        if (apply_default_layout_) {
+            apply_default_layout_ = false;
+            build_default_dock_layout(dockspace);
+        }
 
         draw_menu_bar();
         draw_toolbar();
