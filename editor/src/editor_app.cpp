@@ -1914,7 +1914,7 @@ void EditorApp::draw_viewport_overlay(const Camera& camera, EntityId cam_entity)
 // Geometry for the viewport debug toggles, fed into the renderer's DebugLine
 // channel. Geometry generation lives in physics (debug_draw.h) for colliders;
 // grid/axes/selection are trivial world-space segments built here.
-std::vector<DebugLine> EditorApp::build_debug_lines() const {
+std::vector<DebugLine> EditorApp::build_debug_lines() {
     constexpr u32 kMaxDebugLines = 4096; // matches the renderer's line VB capacity
     std::vector<DebugLine> out;
     auto add = [&out](const DebugSegment& s, const math::Vec4& color) {
@@ -1941,10 +1941,12 @@ std::vector<DebugLine> EditorApp::build_debug_lines() const {
             const math::Mat4 wm = world_matrix(w, selected_);
             const math::Vec3 center{static_cast<f32>(wm[3][0]), static_cast<f32>(wm[3][1]),
                                     static_cast<f32>(wm[3][2])};
-            // Prefer the collider's own half extents when present.
+            // Prefer the collider's own size when present: box half extents,
+            // or the radius for sphere/capsule.
             math::Vec3 half = tc->scale * 0.5f;
             if (const auto* col = w.get<ColliderComponent>(selected_)) {
                 if (col->shape == ColliderComponent::Shape::Box) half = col->half_extents;
+                else half = math::Vec3(col->radius);
             }
             for (const auto& s : aabb_edges(center, half))
                 add(s, math::Vec4(1.f, 0.5f, 0.1f, 1.f)); // orange
@@ -1965,8 +1967,14 @@ std::vector<DebugLine> EditorApp::build_debug_lines() const {
             for (const auto& s : collider_wireframe_edges(*col, wm)) add(s, color);
         }
     }
-    if (out.size() >= kMaxDebugLines)
-        IGNIS_WARN("debug lines capped at {} segments", kMaxDebugLines);
+    if (out.size() >= kMaxDebugLines) {
+        if (!dbg_cap_warned_) { // warn once per overflow, not every frame
+            IGNIS_WARN("debug lines capped at {} segments", kMaxDebugLines);
+            dbg_cap_warned_ = true;
+        }
+    } else {
+        dbg_cap_warned_ = false;
+    }
     return out;
 }
 
