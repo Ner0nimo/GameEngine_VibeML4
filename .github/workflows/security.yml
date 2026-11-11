@@ -117,7 +117,8 @@ jobs:
               *)   max_len=1048576 ;;
             esac
             echo "== fuzz_$t (max_total_time=${{ env.FUZZ_SECONDS }}s, max_len=$max_len)"
-            # libFuzzer writes newly discovered inputs into the corpus dir and
+            # libFuzzer writes newly discovered inputs into the checked-out
+            # corpus dir (never commit them from a PR run) and
             # -print_final_stats logs coverage stats for growth tracking.
             ./build/fuzz/tests/fuzz/fuzz_$t \
               -max_total_time=${{ env.FUZZ_SECONDS }} -max_len=$max_len -rss_limit_mb=2560 \
@@ -172,6 +173,8 @@ jobs:
         with:
           fetch-depth: 0 # scan the full history, not just the PR diff
       - name: Run gitleaks
+        # gitleaks-action v2 is free for personal accounts; if this repo ever
+        # moves under an org, set GITLEAKS_LICENSE here.
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

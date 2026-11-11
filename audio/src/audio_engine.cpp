@@ -50,7 +50,11 @@ static bool decode_impl(const ma_decoder_config* cfg_hint, const char* path,
         // 256 MiB of f32; the result is moved, not copied).
         constexpr ma_uint64 kMaxDecodedSamples = 64ull * 1024 * 1024; // 256 MiB of f32
         const ma_uint64 channels64 = decoder.outputChannels == 0 ? 1 : decoder.outputChannels;
-        if (total_frames > kMaxDecodedSamples / channels64) return false;
+        if (total_frames > kMaxDecodedSamples / channels64) {
+            IGNIS_WARN("decode: claimed {} frames exceeds the {} sample cap", total_frames,
+                       kMaxDecodedSamples);
+            return false;
+        }
         const size_t total_samples =
             static_cast<size_t>(total_frames) * static_cast<size_t>(decoder.outputChannels);
         std::vector<f32> buffer(total_samples);
@@ -68,7 +72,8 @@ static bool decode_impl(const ma_decoder_config* cfg_hint, const char* path,
         out.frames = read_frames;
         out.samples = std::move(buffer); // move: no second large allocation
         return true;
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+        IGNIS_WARN("decode: failed with exception: {}", e.what());
         return false;
     }
 }

@@ -442,3 +442,94 @@ TEST(AssetsMalformed, GltfTooManyImagesRejected) {
     EXPECT_NO_THROW(EXPECT_EQ(am.load_model(p.string()), nullptr));
     fs::remove(p);
 }
+
+namespace {
+
+// Minimal GLB (binary glTF): JSON chunk + BIN chunk with one triangle
+// (3 vec3 positions + 3 u16 indices in buffers[0], no uri -> BIN chunk).
+std::vector<u8> make_glb_triangle(const std::string& extra_buffers_json = "") {
+    std::vector<u8> bin(42, 0);
+    const float pos[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    const uint16_t idx[3] = {0, 1, 2};
+    std::memcpy(bin.data(), pos, sizeof(pos));
+    std::memcpy(bin.data() + 36, idx, sizeof(idx));
+
+    std::string json = "{\"asset\":{\"version\":\"2.0\"},"
+        "\"buffers\":[{\"byteLength\":42}" + extra_buffers_json + "],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36,\"target\":34962},"
+        "{\"buffer\":0,\"byteOffset\":36,\"byteLength\":6,\"target\":34963}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\",\"min\":[0,0,0],\"max\":[1,1,0]},"
+        "{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1}]}],"
+        "\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}],\"scene\":0}";
+    while (json.size() % 4 != 0) json += ' ';
+    while (bin.size() % 4 != 0) bin.push_back(0);
+
+    std::vector<u8> glb;
+    auto u32le = [&](u32 v) {
+        for (int i = 0; i < 4; ++i) glb.push_back(static_cast<u8>(v >> (8 * i)));
+    };
+    u32le(0x46546C67u); // "glTF"
+    u32le(2);
+    u32le(0); // total length, patched below
+    u32le(static_cast<u32>(json.size()));
+    u32le(0x4E4F534Au); // "JSON"
+    glb.insert(glb.end(), json.begin(), json.end());
+    u32le(static_cast<u32>(bin.size()));
+    u32le(0x004E4942u); // "BIN\0"
+    glb.insert(glb.end(), bin.begin(), bin.end());
+    const u32 total = static_cast<u32>(glb.size());
+    for (size_t i = 0; i < 4; ++i)
+        glb[static_cast<size_t>(8) + i] = static_cast<u8>(total >> (8 * i));
+    return glb;
+}
+
+} // namespace
+
+TEST(AssetsMalformed, GlbLoadsFromDiskInEditorMode) {
+    const auto glb = make_glb_triangle();
+    const auto p = write_tmp_bytes("ignis_tri.glb", glb);
+    AssetManager am; // EditorFilesystem
+    auto model = am.load_model(p.string());
+    ASSERT_NE(model, nullptr);
+    ASSERT_EQ(model->mesh->primitives.size(), 1u);
+    EXPECT_EQ(model->mesh->primitives[0].positions.size(), 3u);
+    fs::remove(p);
+}
+
+TEST(AssetsMalformed, GlbLoadsFromPakInPackageOnly) {
+    // Boundary pin: a GLB served only from the pak must load without any
+    // host-FS access (the BIN chunk is served in-memory by cgltf).
+    const auto glb = make_glb_triangle();
+    const auto pak_path = fs::temp_directory_path() / "ignis_glb.ignispak";
+    PakWriter w;
+    ASSERT_TRUE(w.add_file("assets/m.glb", glb).ok());
+    ASSERT_TRUE(w.write(pak_path.string()).ok());
+    PakReader reader;
+    ASSERT_TRUE(reader.open(pak_path.string()).ok());
+    AssetManager am;
+    am.set_pak(&reader);
+    am.set_access_mode(AssetAccessMode::PackageOnly);
+    auto model = am.load_model("assets/m.glb");
+    ASSERT_NE(model, nullptr);
+    ASSERT_EQ(model->mesh->primitives.size(), 1u);
+    EXPECT_EQ(model->mesh->primitives[0].positions.size(), 3u);
+    fs::remove(pak_path);
+}
+
+TEST(AssetsMalformed, GlbWithExternalBufferUriRejectedInPackageOnly) {
+    // A GLB carrying an extra buffer with a traversal URI must be rejected
+    // at the pak boundary, not opened from the host FS.
+    const auto glb = make_glb_triangle(",{\"uri\":\"../evil.bin\",\"byteLength\":4}");
+    const auto pak_path = fs::temp_directory_path() / "ignis_glb_evil.ignispak";
+    PakWriter w;
+    ASSERT_TRUE(w.add_file("assets/m.glb", glb).ok());
+    ASSERT_TRUE(w.write(pak_path.string()).ok());
+    PakReader reader;
+    ASSERT_TRUE(reader.open(pak_path.string()).ok());
+    AssetManager am;
+    am.set_pak(&reader);
+    am.set_access_mode(AssetAccessMode::PackageOnly);
+    EXPECT_EQ(am.load_model("assets/m.glb"), nullptr);
+    fs::remove(pak_path);
+}

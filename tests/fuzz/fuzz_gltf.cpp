@@ -1,9 +1,13 @@
 // libFuzzer target for glTF model loading. The input is written to a temp
 // file inside a per-process temp dir that acts as the project root, then
 // loaded through AssetManager in ProjectFilesystem mode (the same path the
-// runtime uses for pak/project content). Inputs containing external
-// (non-data:) URIs are skipped so the fuzzer never touches the host FS via
-// cgltf's own FILE* buffer loading.
+// runtime uses for pak/project content).
+//
+// Deliberate exclusion: inputs containing ANY non-data: "uri" (buffer OR
+// image URIs) are skipped, so the fuzzer never triggers host-FS reads via
+// cgltf's own FILE* buffer loading or via load_texture(dir + img.uri).
+// Traversal/absolute rejection for those image paths is covered by the
+// AssetsSecurity unit tests instead.
 
 #include "ignis/assets/asset_manager.h"
 

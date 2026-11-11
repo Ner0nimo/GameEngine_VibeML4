@@ -57,6 +57,10 @@ Rules for PRs from agents:
 - `.github/CODEOWNERS` requires owner review only for CI/dependency
   infrastructure and the security-critical parsers (core/assets/agent/audio
   sources, fuzz harnesses); general engine code is open to any reviewer.
+- Nightly fuzz runs upload the grown corpora as the `fuzz-corpus-update`
+  artifact; merge those back into `tests/fuzz/corpus/` manually (weekly) so
+  coverage keeps growing. Crash artifacts (`fuzz-crash-artifacts`) are
+  regressions — fix and add them as corpus seeds.
 
 ## Architecture
 
