@@ -127,7 +127,10 @@ FetchContent_Declare(nvrhi
     GIT_SHALLOW TRUE)
 FetchContent_Declare(imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG c1aaac65e896a45f81f47a4d68f9959e0f86c859 # was tag v1.93.0
+    # docking branch head, 1.93.1 WIP, master-merged; mainline v1.93.0 has no
+    # DockSpace/DockBuilder API, needed for dockable panels, issue #56.
+    # Re-pin to a tagged 1.93.1+ docking release once available.
+    GIT_TAG cf53467ab0db7a783f04b32dd9160e6aa5b720ef
     GIT_SHALLOW TRUE)
 FetchContent_Declare(imguizmo
     GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
