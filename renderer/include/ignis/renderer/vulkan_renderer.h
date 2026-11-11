@@ -31,6 +31,16 @@ struct RawVulkanHandles {
 
 // NVRHI/Vulkan implementation of IRenderer.
 //
+// Asset-failure recovery policy (issue #114, fix B + strict package mode):
+// loaders stay strict (load_model fails on any failed image) and record
+// structured per-image AssetErrors. In editor modes the renderer recovers via
+// load_model_lenient: failed-texture primitives draw with channel-appropriate
+// default textures (texWhite / texNormalDefault) plus one deduplicated
+// IGNIS_WARN per model (image index, path, reason); structurally invalid models
+// are never recovered (mesh dropped, one warning per path, not cached so editor
+// hot-reload recovers). In package-only runtime (AssetAccessMode::PackageOnly)
+// nothing is substituted: the mesh is dropped with an explicit IGNIS_ERROR.
+//
 // Deferred pipeline: G-Buffer (albedo/normal/ORM/emissive/worldPos) ->
 // shadow map (directional, PCSS soft shadows) -> SSAO (+blur) ->
 // PBR lighting with split-sum IBL (irradiance + prefiltered radiance cubemap

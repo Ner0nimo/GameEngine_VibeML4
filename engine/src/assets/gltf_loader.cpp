@@ -30,8 +30,10 @@ std::vector<float> read_accessor_floats(const cgltf_accessor* acc) {
 
 // Builds the engine Model from a parsed, buffer-loaded, validated cgltf
 // document. May throw (read_accessor_floats); load_model_impl contains that.
-// A referenced image that fails to load fails the whole model: substituting
-// a placeholder here would conceal the failure from every caller.
+// A referenced image that fails to load is recorded in Model::texture_errors
+// with a null texture slot (structured, never concealed); load_model() turns
+// texture errors into a failure, load_model_lenient() keeps the partial model
+// for the renderer's recovery policy (issue #114).
 Result<std::shared_ptr<Model>> build_model(const cgltf_data* data, const std::string& path,
                                            AssetManager& assets) {
     using ModelResult = Result<std::shared_ptr<Model>>;
@@ -39,11 +41,16 @@ Result<std::shared_ptr<Model>> build_model(const cgltf_data* data, const std::st
     model->mesh = std::make_shared<Mesh>();
     model->mesh->name = path;
 
-    // Textures first so material slots can reference indices.
+    // Textures first so material slots can reference indices. A failed image is
+    // recorded as a structured AssetError and leaves a null slot — the model
+    // itself still builds; load_model() turns texture errors into a failure,
+    // load_model_lenient() exposes the partial model for renderer recovery.
     for (size_t i = 0; i < data->images_count; ++i) {
         const cgltf_image& img = data->images[i];
         Result<std::shared_ptr<Texture>> tex_r = Result<std::shared_ptr<Texture>>::failure(
             "image has neither bufferView nor uri");
+        AssetError err;
+        err.image_index = static_cast<int>(i);
         if (img.buffer_view && img.buffer_view->buffer && img.buffer_view->buffer->data) {
             const u8* base = static_cast<const u8*>(img.buffer_view->buffer->data);
             const size_t offset = img.buffer_view->offset;
@@ -55,17 +62,40 @@ Result<std::shared_ptr<Model>> build_model(const cgltf_data* data, const std::st
             const std::string virtual_path = path + "#image" + std::to_string(i) + ext;
             std::vector<u8> img_bytes(base + offset, base + offset + size);
             tex_r = decode_texture_memory(virtual_path, img_bytes, false);
+            if (!tex_r.ok()) {
+                err.kind = AssetErrorKind::Decode;
+                err.message = tex_r.error();
+                err.source_path = virtual_path;
+            }
         } else if (img.uri) {
             // External file: resolve relative to the gltf directory.
             std::string dir = path;
             const auto pos = dir.find_last_of("/\\");
             dir = (pos == std::string::npos) ? "" : dir.substr(0, pos + 1);
-            tex_r = assets.load_texture(dir + img.uri);
+            const std::string img_path = dir + img.uri;
+            tex_r = assets.load_texture(img_path);
+            if (!tex_r.ok()) {
+                err.source_path = img_path;
+                // Classify Io vs decode: re-read to see if the file exists.
+                auto fr = assets.read_file(img_path);
+                if (fr.ok()) {
+                    err.kind = AssetErrorKind::Decode;
+                    err.message = "texture decode failed for '" + img_path + "': " + tex_r.error();
+                } else {
+                    err.kind = AssetErrorKind::MissingDependency;
+                    err.message = fr.error();
+                }
+            }
+        } else {
+            err.kind = AssetErrorKind::InvalidFormat;
+            err.message = "image has neither bufferView nor uri";
         }
-        if (!tex_r.ok())
-            return ModelResult::failure(
-                std::format("load_model: '{}' image {}: {}", path, i, tex_r.error()));
-        model->textures.push_back(std::move(tex_r.value()));
+        if (!tex_r.ok()) {
+            model->texture_errors.push_back(std::move(err));
+            model->textures.push_back(nullptr);
+        } else {
+            model->textures.push_back(std::move(tex_r.value()));
+        }
     }
 
     // Materials.
@@ -305,13 +335,26 @@ Result<std::shared_ptr<Model>> AssetManager::load_model_impl(const std::string& 
     }
 }
 
-Result<std::shared_ptr<Model>> AssetManager::load_model(const std::string& path) {
+Result<std::shared_ptr<Model>> AssetManager::load_model_lenient(const std::string& path) {
     auto it = cache_.find(path);
     if (it != cache_.end())
         return Result<std::shared_ptr<Model>>::success(
             std::static_pointer_cast<Model>(it->second));
     auto model_r = load_model_impl(path);
     if (model_r.ok()) cache_[path] = model_r.value();
+    return model_r;
+}
+
+Result<std::shared_ptr<Model>> AssetManager::load_model(const std::string& path) {
+    auto model_r = load_model_lenient(path);
+    if (model_r.ok() && !model_r.value()->texture_errors.empty()) {
+        // Strict contract: a model with failed texture images is a failure for
+        // general callers; the renderer uses load_model_lenient for recovery.
+        std::string msg = std::format("load_model: '{}' failed image(s):", path);
+        for (const AssetError& e : model_r.value()->texture_errors)
+            msg += std::format(" [image {} '{}': {}]", e.image_index, e.source_path, e.message);
+        return Result<std::shared_ptr<Model>>::failure(std::move(msg));
+    }
     return model_r;
 }
 

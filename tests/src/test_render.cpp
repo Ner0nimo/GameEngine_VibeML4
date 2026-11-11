@@ -11,6 +11,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 
 #ifdef IGNIS_RENDERER_VULKAN
 #include "ignis/physics/physics_world.h"
@@ -601,6 +604,77 @@ TEST(Render, WindowedResizeRecreatesSwapchain) {
         << "child status=" << status << " (2=no window, 3=no renderer, 4/5=not windowed, 6=extent did not shrink)";
 }
 
+// Issue #114 fix B: in editor mode a model with a missing texture still
+// renders (placeholder texture) instead of disappearing — assert the mesh is
+// visible (non-sky pixels present).
+TEST(Render, MissingTextureKeepsMeshVisible) {
+    if (!gpu_render_works()) GTEST_SKIP() << "Vulkan/NVRHI device not usable in this environment";
+    // Minimal gltf triangle whose base-color texture is missing.
+    const float pos[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    const uint16_t idx[3] = {0, 1, 2};
+    std::vector<u8> buf(sizeof(pos) + sizeof(idx));
+    std::memcpy(buf.data(), pos, sizeof(pos));
+    std::memcpy(buf.data() + sizeof(pos), idx, sizeof(idx));
+    static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string enc;
+    for (size_t i = 0; i < buf.size(); i += 3) {
+        u32 v = static_cast<u32>(buf[i]) << 16;
+        if (i + 1 < buf.size()) v |= static_cast<u32>(buf[i + 1]) << 8;
+        if (i + 2 < buf.size()) v |= static_cast<u32>(buf[i + 2]);
+        enc.push_back(b64[(v >> 18) & 63]);
+        enc.push_back(b64[(v >> 12) & 63]);
+        enc.push_back(i + 1 < buf.size() ? b64[(v >> 6) & 63] : '=');
+        enc.push_back(i + 2 < buf.size() ? b64[v & 63] : '=');
+    }
+    std::string json =
+        "{\"asset\":{\"version\":\"2.0\"},"
+        "\"buffers\":[{\"uri\":\"data:application/octet-stream;base64," + enc +
+        "\",\"byteLength\":" + std::to_string(buf.size()) + "}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36,\"target\":34962},"
+        "{\"buffer\":0,\"byteOffset\":36,\"byteLength\":6,\"target\":34963}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\",\"min\":[0,0,0],\"max\":[1,1,0]},"
+        "{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}],"
+        "\"images\":[{\"uri\":\"definitely_missing.png\"}],\"textures\":[{\"source\":0}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1,\"material\":0}]}],"
+        "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0},\"baseColorFactor\":[1,1,1,1]}}],"
+        "\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}],\"scene\":0}";
+    const auto path = std::filesystem::temp_directory_path() / "ignis_missing_tex_render.gltf";
+    {
+        std::ofstream f(path);
+        f << json;
+    }
+
+    Scene scene("missing_tex");
+    register_builtin_components(scene.world());
+    EntityId tri = scene.world().create_entity("tri");
+    scene.world().emplace<TransformComponent>(tri);
+    scene.world().emplace<MeshRendererComponent>(tri)->model_path = path.string();
+    EntityId sun = scene.world().create_entity("sun");
+    scene.world().emplace<DirectionalLightComponent>(sun)->direction = {0.f, -1.f, -0.5f};
+    EntityId cam = scene.world().create_entity("cam");
+    auto* ct = scene.world().emplace<TransformComponent>(cam);
+    ct->position = {0.f, 0.f, 3.f};
+    auto* cc = scene.world().emplace<CameraComponent>(cam);
+    cc->active = true;
+
+    Camera camera;
+    camera.position = {0.f, 0.f, 3.f};
+    camera.fov_y_deg = 60.f;
+    VulkanRenderer renderer; // default editor filesystem mode -> placeholder policy
+    ASSERT_TRUE(renderer.init_offscreen(64, 64).ok());
+    renderer.render(scene, camera, 1.f / 60.f);
+    auto pxr = renderer.readback();
+    ASSERT_TRUE(pxr.ok()) << pxr.error();
+    const std::vector<u8>& px = pxr.value();
+    u32 lit = 0;
+    for (size_t i = 0; i < px.size(); i += 4)
+        if (static_cast<u32>(px[i]) + px[i + 1] + px[i + 2] > 60u) ++lit;
+    std::fprintf(stderr, "missing-texture render: lit pixels=%u\n", lit);
+    EXPECT_GT(lit, 4u) << "mesh must stay visible with a placeholder texture";
+    renderer.shutdown();
+    std::filesystem::remove(path);
+}
+
 #else
 
 TEST(Render, OffscreenCubeLit) {
@@ -619,6 +693,9 @@ TEST(Render, DebugLinesDrawn) {
     GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
 }
 TEST(Render, TestSceneOffscreenRenders) {
+    GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
+}
+TEST(Render, MissingTextureKeepsMeshVisible) {
     GTEST_SKIP() << "requires a graphics build (IGNIS_WITH_GRAPHICS=ON)";
 }
 TEST(Render, OffscreenResize) {
