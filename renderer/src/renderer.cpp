@@ -28,6 +28,16 @@ std::vector<f32> cascade_splits(f32 z_near, f32 z_far, u32 count, f32 lambda) {
 namespace ignis::picking {
 
 Ray screen_ray(const Camera& cam, f32 aspect, f32 ndc_x, f32 ndc_y) {
+    if (cam.orthographic) {
+        // Parallel ray: origin offset across the view plane, direction = forward.
+        const f32 half_h = cam.ortho_size;
+        const f32 half_w = half_h * aspect;
+        const math::Vec3 right = glm::rotate(cam.rotation, math::Vec3(1.f, 0.f, 0.f));
+        const math::Vec3 up = glm::rotate(cam.rotation, math::Vec3(0.f, 1.f, 0.f));
+        const math::Vec3 fwd = glm::rotate(cam.rotation, math::Vec3(0.f, 0.f, -1.f));
+        const math::Vec3 origin = cam.position + right * (ndc_x * half_w) + up * (ndc_y * half_h);
+        return Ray{origin, fwd};
+    }
     const f32 fov_y = math::radians(cam.fov_y_deg);
     const f32 tan_half = glm::tan(fov_y * 0.5f);
     // Camera-space direction (looking down -Z).

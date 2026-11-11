@@ -23,7 +23,6 @@
 
 #ifdef IGNIS_WITH_GRAPHICS
 #include <vulkan/vulkan.h>
-#include <imgui.h>
 #endif
 
 namespace ignis {
@@ -73,13 +72,8 @@ private:
         std::vector<VkImageView> views;
         std::vector<VkFramebuffer> fbs;
         u32 image_count = 0;
-        u32 fb_width = 0;   // swapchain extent the views/fbs were built for
-        u32 fb_height = 0;
-        VkFormat format = VK_FORMAT_UNDEFINED;
     };
     UiHandles ui_;
-    ImGuiStyle base_style_{};  // pristine style captured after StyleColorsDark
-    f32 content_scale_ = 1.f;  // last applied DPI content scale
 
     // --- editor UI state ------------------------------------------------------
     std::string scene_path_; // file the current scene is loaded from / saves to
@@ -95,7 +89,7 @@ private:
     bool show_statusbar_ = true;
     bool show_overlay_ = true;  // viewport text overlay
     bool show_help_ = false;
-    int bottom_tab_ = 0; // 0 = console, 1 = assets, 2 = stats, 3 = scene settings
+    int bottom_tab_ = 0; // 0 = console, 1 = assets, 2 = stats
     std::vector<std::pair<LogLevel, std::string>> console_;
     std::mutex console_mutex_;
     char console_filter_[128] = "";
@@ -116,6 +110,15 @@ private:
     bool rmb_down_ = false;
     f64 last_mx_ = 0.0, last_my_ = 0.0;
     bool left_clicked_ = false;
+    // Viewport camera state (editor-only: persisted to editor_state.json,
+    // never serialized into the scene file).
+    Camera editor_cam_;           // standalone editor camera, flown instead of the scene camera
+    Camera view_cam_;             // the camera the viewport rendered last frame
+    bool standalone_cam_ = false; // true: viewport input drives editor_cam_, not the scene
+    bool editor_ortho_ = false;   // viewport projection mode: perspective vs orthographic
+    f32 editor_ortho_size_ = 10.f;
+    f32 cam_speed_ = 6.f;         // fly speed in units/s (Shift = 4x)
+    f64 scroll_pending_ = 0.0;    // accumulated wheel delta, consumed by handle_viewport_input
 
     static bool probe_vulkan_device();
     Result<void> init_window_and_renderer();
@@ -124,22 +127,24 @@ private:
     void main_loop(); // one frame = input, simulate, UI, render
     void shutdown_ui();
 
-    // Swapchain-dependent UI resources (issue #53): rebuilt whenever the
-    // renderer recreates the swapchain. The ImGui context/GLFW backend and
-    // descriptor/command pools survive; views/framebuffers/render pass and
-    // the ImGui Vulkan backend registration do not.
-    Result<void> create_ui_swapchain_resources();
-    void destroy_ui_swapchain_resources();
-    void rebuild_ui_after_swapchain_change();
-    void apply_content_scale(f32 scale);
-    void load_window_settings();
-    void save_window_settings() const;
-
     // One frame of UI, one function per panel (one level of abstraction).
     EntityId find_active_camera() const;
     void update_camera(Camera& camera, EntityId cam_entity) const;
+    // Publish the camera the viewport renders this frame: the standalone
+    // editor camera when enabled, else the scene's active camera, with the
+    // editor-side projection mode applied on top.
+    void publish_view_camera(Camera& camera, EntityId cam_entity);
     void handle_viewport_input(Camera& camera, EntityId cam_entity, f32 dt);
     void handle_shortcuts();
+    // Write pose/offset to whichever camera the viewport input drives.
+    void set_view_pose(const math::Vec3& pos, const math::Quat& rot, EntityId cam_entity);
+    void apply_view_offset(const math::Vec3& delta, EntityId cam_entity);
+    void apply_view_rotation(const math::Quat& rot, EntityId cam_entity);
+    void sync_yaw_pitch_from(const math::Quat& rot);
+    void set_standalone_camera(bool on, EntityId cam_entity);
+    void load_editor_state();
+    void save_editor_state() const;
+    void frame_view(const math::Vec3& center, f32 radius, f32 aspect, EntityId cam_entity);
     void draw_menu_bar();
     void draw_open_scene_menu();
     void draw_gameobject_menu();
@@ -155,9 +160,9 @@ private:
     void draw_console_input();
     void draw_asset_browser();
     void draw_stats(f32 dt);
-    void draw_scene_settings();
     void draw_status_bar(f32 dt);
     void draw_viewport_gizmo(const Camera& camera, f32 aspect);
+    void draw_view_nav_gizmo(const Camera& camera, f32 aspect, EntityId cam_entity);
     void draw_viewport_overlay(const Camera& camera, EntityId cam_entity);
     // scene actions (shared by menus, toolbar and shortcuts)
     void update_window_title();
@@ -169,6 +174,7 @@ private:
     void stop_play();  // restore the snapshot taken by start_play
     EntityId create_gameobject(const std::string& kind);
     void frame_selected();
+    void frame_scene();
     void run_console_command(const std::string& line);
     void assign_selected_asset();
     void delete_entity(EntityId e);

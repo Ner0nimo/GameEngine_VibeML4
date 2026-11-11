@@ -20,3 +20,4 @@ Thumbs.db
 logs/
 imgui.ini
 editor_window.json
+editor_state.json

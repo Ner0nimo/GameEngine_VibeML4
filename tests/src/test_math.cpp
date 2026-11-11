@@ -28,3 +28,19 @@ TEST(Math, LookAt) {
     const glm::vec4 origin_view = v * glm::vec4(0, 0, 0, 1);
     EXPECT_NEAR(origin_view.z, -5.f, 1e-5f);
 }
+
+TEST(Math, OrthoVk) {
+    const math::Mat4 o = math::ortho_vk(-2.f, 2.f, -1.f, 1.f, 0.1f, 100.f);
+    // Vulkan depth [0,1]: z=-near -> 0, z=-far -> 1.
+    const glm::vec4 clip_near = o * glm::vec4(0.f, 0.f, -0.1f, 1.f);
+    EXPECT_NEAR(clip_near.z / clip_near.w, 0.f, 1e-5f);
+    const glm::vec4 clip_far = o * glm::vec4(0.f, 0.f, -100.f, 1.f);
+    EXPECT_NEAR(clip_far.z / clip_far.w, 1.f, 1e-4f);
+    // Edges map to NDC +-1.
+    EXPECT_NEAR((o * glm::vec4(-2.f, 0.f, -1.f, 1.f)).x, -1.f, 1e-5f);
+    EXPECT_NEAR((o * glm::vec4(2.f, 0.f, -1.f, 1.f)).x, 1.f, 1e-5f);
+    EXPECT_NEAR((o * glm::vec4(0.f, -1.f, -1.f, 1.f)).y, -1.f, 1e-5f);
+    EXPECT_NEAR((o * glm::vec4(0.f, 1.f, -1.f, 1.f)).y, 1.f, 1e-5f);
+    // w stays 1 (parallel projection).
+    EXPECT_NEAR(clip_near.w, 1.f, 1e-6f);
+}

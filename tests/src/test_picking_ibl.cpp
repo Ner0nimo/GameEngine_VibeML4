@@ -19,6 +19,49 @@ TEST(Picking, ScreenRayCenter) {
     EXPECT_NEAR(r.dir.z, -1.f, 1e-6f);
 }
 
+TEST(Picking, ScreenRayOrtho) {
+    Camera cam;
+    cam.orthographic = true;
+    cam.ortho_size = 5.f;
+    cam.position = {1.f, 2.f, 3.f};
+    cam.rotation = math::Quat(1.f, 0.f, 0.f, 0.f); // identity: looks down -Z
+    const f32 aspect = 2.f;
+    // Center ray: origin at the camera, direction = forward.
+    const picking::Ray center = picking::screen_ray(cam, aspect, 0.f, 0.f);
+    EXPECT_NEAR(center.origin.x, 1.f, 1e-6f);
+    EXPECT_NEAR(center.origin.y, 2.f, 1e-6f);
+    EXPECT_NEAR(center.origin.z, 3.f, 1e-6f);
+    EXPECT_NEAR(center.dir.z, -1.f, 1e-6f);
+    // Corner ray (ndc = 1,1): origin offset by half the view volume, same direction.
+    const picking::Ray corner = picking::screen_ray(cam, aspect, 1.f, 1.f);
+    EXPECT_NEAR(corner.origin.x, 1.f + 10.f, 1e-5f); // ortho_size * aspect
+    EXPECT_NEAR(corner.origin.y, 2.f + 5.f, 1e-5f);  // ortho_size
+    EXPECT_NEAR(corner.dir.z, -1.f, 1e-6f);
+    EXPECT_NEAR(corner.dir.x, 0.f, 1e-6f);
+}
+
+TEST(Camera, OrthoProjectionMatrix) {
+    Camera cam;
+    cam.orthographic = true;
+    cam.ortho_size = 10.f;
+    cam.z_near = 0.1f;
+    cam.z_far = 100.f;
+    const math::Mat4 p = cam.projection_matrix(2.f);
+    // Same mapping as math::ortho_vk over the ortho_size-derived volume.
+    const glm::vec4 near_clip = p * glm::vec4(0.f, 0.f, -0.1f, 1.f);
+    EXPECT_NEAR(near_clip.z / near_clip.w, 0.f, 1e-4f);
+    const glm::vec4 far_clip = p * glm::vec4(0.f, 0.f, -100.f, 1.f);
+    EXPECT_NEAR(far_clip.z / far_clip.w, 1.f, 1e-3f);
+    EXPECT_NEAR((p * glm::vec4(-20.f, 0.f, -1.f, 1.f)).x, -1.f, 1e-5f); // -ortho_size*aspect
+    EXPECT_NEAR((p * glm::vec4(0.f, 10.f, -1.f, 1.f)).y, 1.f, 1e-5f);   // +ortho_size
+    // Default is perspective.
+    const Camera persp;
+    EXPECT_FALSE(persp.orthographic);
+    const math::Mat4 pp = persp.projection_matrix(1.f);
+    EXPECT_NEAR((pp * glm::vec4(0.f, 0.f, -0.1f, 1.f)).z / (pp * glm::vec4(0.f, 0.f, -0.1f, 1.f)).w,
+                0.f, 1e-4f);
+}
+
 TEST(Picking, RayAabb) {
     const math::Vec3 o{0.f, 0.f, -5.f};
     const math::Vec3 d{0.f, 0.f, 1.f};
