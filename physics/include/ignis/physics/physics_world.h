@@ -6,6 +6,7 @@
 #include "ignis/ecs/entity.h"
 #include "ignis/math/math.h"
 
+#include <cmath>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -42,6 +43,22 @@ struct ColliderComponent {
     f32 height = 1.f;                           // Capsule (cylinder part)
 };
 
+// Clamps untrusted physics component values into valid ranges so a malformed
+// scene cannot inject NaN/inf or degenerate geometry into reactphysics3d.
+// Applied at deserialization and again at the simulation boundary.
+inline void sanitize(RigidBodyComponent& c) {
+    if (!std::isfinite(c.mass) || c.mass <= 0.f) c.mass = 1.f; // positive mass for dynamic bodies
+    if (!std::isfinite(c.linear_damping) || c.linear_damping < 0.f) c.linear_damping = 0.f;
+}
+
+inline void sanitize(ColliderComponent& c) {
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(c.half_extents[i]) || c.half_extents[i] <= 0.f) c.half_extents[i] = 0.5f;
+    }
+    if (!std::isfinite(c.radius) || c.radius <= 0.f) c.radius = 0.5f;
+    if (!std::isfinite(c.height) || c.height <= 0.f) c.height = 1.f;
+}
+
 // --- Serialization traits ----------------------------------------------------
 
 template <>
@@ -59,6 +76,7 @@ struct ComponentIO<RigidBodyComponent> {
         else c.type = RigidBodyComponent::Type::Dynamic;
         if (j.contains("mass")) c.mass = j["mass"].get<f32>();
         if (j.contains("linear_damping")) c.linear_damping = j["linear_damping"].get<f32>();
+        sanitize(c);
         return c;
     }
 };
@@ -84,6 +102,7 @@ struct ComponentIO<ColliderComponent> {
         if (j.contains("half_extents")) ::ignis::from_json(j["half_extents"], c.half_extents);
         if (j.contains("radius")) c.radius = j["radius"].get<f32>();
         if (j.contains("height")) c.height = j["height"].get<f32>();
+        sanitize(c);
         return c;
     }
 };
