@@ -3,6 +3,7 @@
 #include "ignis/core/log.h"
 #include "ignis/core/pak.h"
 #include "ignis/core/path_util.h"
+#include "texture_decode.h"
 
 #include <stb_image.h>
 
@@ -93,6 +94,17 @@ std::shared_ptr<Texture> decode_texture_memory(
     const std::string& name, const std::vector<u8>& bytes, bool force_hdr) {
     constexpr size_t kMaxImageBytes = 256ull << 20; // reject before size_t -> int
     if (bytes.size() > kMaxImageBytes) return nullptr;
+    // Reject oversized decoded dimensions before stb allocates the output:
+    // a tiny header can claim gigabytes of pixels.
+    int iw = 0, ih = 0, icomp = 0;
+    if (!stbi_info_from_memory(bytes.data(), static_cast<int>(bytes.size()), &iw, &ih, &icomp))
+        return nullptr;
+    const long long max_pixels = force_hdr ? kMaxHdrTexturePixels : kMaxLdrTexturePixels;
+    if (static_cast<long long>(iw) * static_cast<long long>(ih) > max_pixels) {
+        IGNIS_WARN("decode_texture_memory: '{}' claims {}x{} (over the {} pixel cap)",
+                   name, iw, ih, max_pixels);
+        return nullptr;
+    }
     auto tex = std::make_shared<Texture>();
     tex->name = name;
     int w = 0, h = 0, comp = 0;
