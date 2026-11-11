@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
     AudioSystem audio_sys(audio, &scene);
     AudioSystem::register_lua_bindings(scripts.state());
     PhysicsSystem physics(scene);
-    if (auto r = physics.init({0.f, -9.81f, 0.f}); !r.ok()) {
+    if (auto r = physics.init(scene.settings().gravity); !r.ok()) {
         IGNIS_ERROR("physics init failed: {}", r.error());
         return 1;
     }
@@ -229,7 +229,7 @@ int main(int argc, char** argv) {
     // --- run ------------------------------------------------------------------
     if (args.headless) {
         for (int i = 0; i < args.frames; ++i) {
-            scene.update(args.dt);
+            scene.update(args.dt * scene.settings().time_scale); // sim time only
             sync_listener();
         }
         if (!args.dump_path.empty()) {
@@ -284,7 +284,7 @@ int main(int argc, char** argv) {
     while (!window.should_close()) {
         window.poll_events();
         const f32 dt = window.delta_time();
-        scene.update(dt);
+        scene.update(dt * scene.settings().time_scale); // sim time only, not frame rate
         sync_listener();
         for (EntityId e : scene.world().view<CameraComponent, TransformComponent>()) {
             const auto* cc = scene.world().get<CameraComponent>(e);

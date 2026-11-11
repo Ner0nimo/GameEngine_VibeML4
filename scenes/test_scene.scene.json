@@ -1,5 +1,12 @@
 {
   "name": "test_scene",
+  "settings": {
+    "gravity": [0, -9.81, 0],
+    "time_scale": 1,
+    "ambient_color": [1, 1, 1],
+    "ambient_intensity": 1,
+    "clear_color": [0.05, 0.08, 0.16, 1]
+  },
   "entities": [
     {
       "id": 1,

@@ -19,6 +19,29 @@ void check_string_len(const std::string& s, const SceneLimits& limits, const cha
         throw std::runtime_error(std::string("scene: ") + what + " too long");
 }
 
+// Tolerant readers for the optional "settings" object: malformed fields fall
+// back to defaults instead of failing the whole scene load.
+f32 settings_f32(const nlohmann::json& j, const char* key, f32 fallback) {
+    return (j.contains(key) && j[key].is_number()) ? j[key].get<f32>() : fallback;
+}
+
+math::Vec3 settings_vec3(const nlohmann::json& j, const char* key, math::Vec3 fallback) {
+    if (j.contains(key) && j[key].is_array() && j[key].size() == 3 &&
+        j[key][0].is_number() && j[key][1].is_number() && j[key][2].is_number()) {
+        return {j[key][0].get<f32>(), j[key][1].get<f32>(), j[key][2].get<f32>()};
+    }
+    return fallback;
+}
+
+math::Vec4 settings_vec4(const nlohmann::json& j, const char* key, math::Vec4 fallback) {
+    if (j.contains(key) && j[key].is_array() && j[key].size() == 4 &&
+        j[key][0].is_number() && j[key][1].is_number() && j[key][2].is_number() &&
+        j[key][3].is_number()) {
+        return {j[key][0].get<f32>(), j[key][1].get<f32>(), j[key][2].get<f32>(), j[key][3].get<f32>()};
+    }
+    return fallback;
+}
+
 } // namespace
 
 Scene::Scene(std::string name) : name_(std::move(name)) {}
@@ -85,6 +108,15 @@ nlohmann::json Scene::serialize() const {
     j["prefabs"] = nlohmann::json::object();
     for (const auto& [n, tpl] : prefabs_) j["prefabs"][n] = tpl;
 
+    nlohmann::json sj;
+    sj["gravity"] = {settings_.gravity.x, settings_.gravity.y, settings_.gravity.z};
+    sj["time_scale"] = settings_.time_scale;
+    sj["ambient_color"] = {settings_.ambient_color.x, settings_.ambient_color.y, settings_.ambient_color.z};
+    sj["ambient_intensity"] = settings_.ambient_intensity;
+    sj["clear_color"] = {settings_.clear_color.x, settings_.clear_color.y, settings_.clear_color.z,
+                         settings_.clear_color.w};
+    j["settings"] = std::move(sj);
+
     return j;
 }
 
@@ -93,6 +125,19 @@ Scene Scene::deserialize(const nlohmann::json& j, const SceneLimits& limits) {
         throw std::runtime_error("scene JSON is not an object");
     Scene scene(j.value("name", "Untitled"));
     check_string_len(scene.name(), limits, "scene name");
+
+    if (j.contains("settings") && j["settings"].is_object()) {
+        const nlohmann::json& s = j["settings"];
+        SceneSettings def;
+        scene.settings_.gravity = settings_vec3(s, "gravity", def.gravity);
+        // Clamp to the same ranges the editor widgets enforce, so a hand-edited
+        // scene file can't produce a negative time scale or negative light.
+        scene.settings_.time_scale = std::clamp(settings_f32(s, "time_scale", def.time_scale), 0.f, 4.f);
+        scene.settings_.ambient_color = settings_vec3(s, "ambient_color", def.ambient_color);
+        scene.settings_.ambient_intensity =
+            std::clamp(settings_f32(s, "ambient_intensity", def.ambient_intensity), 0.f, 10.f);
+        scene.settings_.clear_color = settings_vec4(s, "clear_color", def.clear_color);
+    }
 
     if (j.contains("prefabs") && j["prefabs"].is_object()) {
         if (j["prefabs"].size() > limits.max_prefabs)
@@ -184,6 +229,7 @@ Result<void> Scene::load_json(const nlohmann::json& j, const SceneLimits& limits
         world_ = std::move(tmp.world_);
         prefabs_ = std::move(tmp.prefabs_);
         name_ = std::move(tmp.name_);
+        settings_ = tmp.settings_;
         return Result<void>::success();
     } catch (const std::exception& e) {
         return Result<void>::failure(std::string("malformed scene JSON: ") + e.what());

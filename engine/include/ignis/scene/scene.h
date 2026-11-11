@@ -4,6 +4,7 @@
 #include "ignis/core/types.h"
 #include "ignis/ecs/entity.h"
 #include "ignis/ecs/world.h"
+#include "ignis/math/math.h"
 
 #include <functional>
 #include <string>
@@ -28,6 +29,19 @@ struct SceneLimits {
     u64 max_string_bytes = 1ull << 20;  // 1 MiB per string field
 };
 
+// Scene-level configuration, serialized into the scene JSON under "settings"
+// (absent = defaults, so old scene files keep working). Kept deliberately
+// separate from per-camera settings (e.g. CameraComponent::clear_color) and
+// from renderer/environment settings (IBL): ambient here is a flat light
+// term, not the environment map.
+struct SceneSettings {
+    math::Vec3 gravity{0.f, -9.81f, 0.f};
+    f32 time_scale = 1.f; // scales simulation time only, never render frame rate
+    math::Vec3 ambient_color{1.f, 1.f, 1.f};
+    f32 ambient_intensity = 0.f; // flat ambient off by default: existing scenes look unchanged
+    math::Vec4 clear_color{0.02f, 0.02f, 0.03f, 1.f}; // scene default
+};
+
 // A scene owns a world, named prefabs and the system pipeline.
 // Scene files are JSON (see scenes/test_scene.scene.json).
 class Scene {
@@ -44,6 +58,9 @@ public:
 
     const std::string& name() const noexcept { return name_; }
     void set_name(std::string name) { name_ = std::move(name); }
+
+    SceneSettings& settings() noexcept { return settings_; }
+    const SceneSettings& settings() const noexcept { return settings_; }
 
     // Systems run in registration order on every update().
     void add_system(System system) { systems_.push_back(std::move(system)); }
@@ -79,6 +96,7 @@ public:
 private:
     World world_;
     std::string name_;
+    SceneSettings settings_;
     std::vector<System> systems_;
     std::unordered_map<std::string, nlohmann::json> prefabs_;
 };

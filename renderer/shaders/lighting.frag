@@ -44,6 +44,8 @@ layout(set = 1, binding = 256) uniform UniformBuffer {
     float shadowMaxPenumbra;  // PCSS max filter radius, in texels
     float shadowLightSize;    // world-space light size driving the penumbra width
     float _pad2;
+    vec3 ambientColor;        // flat ambient light color (separate from IBL)
+    float _padAmb;
     vec4 clearColor;
     // Local lights (unshadowed), fixed-capacity vec4 arrays.
     vec4 pointPosRange[8];   // xyz = world pos, w = range
@@ -252,6 +254,10 @@ void main() {
     vec3 ssrSpec = ssr.rgb * (Famb * brdf.x + brdf.y);
     ambientSpec = mix(ambientSpec, ssrSpec, ssrConf);
     vec3 ambient = (ambientDiffuse + ambientSpec) * ao * ssao * ubo.ambientStrength;
+    // Flat ambient term from scene settings (kept separate from the IBL
+    // ambient): ambientColor already includes the intensity, and
+    // ambientStrength only scales the IBL term above.
+    ambient += ubo.ambientColor * albedo.rgb * (1.0 - metallic);
 
     vec3 color = ambient + direct + emissive;
     rt_hdr = vec4(color, 1.0);
