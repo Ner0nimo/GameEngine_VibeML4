@@ -121,6 +121,76 @@ TEST(Assets, MissingFileReturnsErrorWithReason) {
     EXPECT_EQ(am.cache_size(), 0u); // failures must not be cached
 }
 
+// Issue #114: a model referencing a missing image fails the strict load_model
+// (with the image error in the message), while load_model_lenient returns the
+// partial model with a structured AssetError and a null texture slot.
+TEST(Assets, GltfMissingImageStructuredError) {
+    std::string json = make_gltf_triangle();
+    const std::string marker = "\"materials\":[{\"pbrMetallicRoughness\":{\"";
+    const auto pos = json.find(marker);
+    ASSERT_NE(pos, std::string::npos);
+    json.replace(pos, marker.size(),
+                 "\"images\":[{\"uri\":\"missing_tex.png\"}],"
+                 "\"textures\":[{\"source\":0}],"
+                 "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0},\"");
+    const auto path = std::filesystem::temp_directory_path() / "ignis_missing_img.gltf";
+    {
+        std::ofstream f(path);
+        f << json;
+    }
+    AssetManager am;
+    // Strict: failure, reason mentions image 0.
+    auto strict_r = am.load_model(path.string());
+    ASSERT_FALSE(strict_r.ok());
+    EXPECT_NE(strict_r.error().find("image 0"), std::string::npos);
+    // Lenient: partial model with structured error.
+    auto lenient_r = am.load_model_lenient(path.string());
+    ASSERT_TRUE(lenient_r.ok());
+    auto& model = lenient_r.value();
+    ASSERT_EQ(model->mesh->primitives.size(), 1u) << "geometry survives a missing texture";
+    ASSERT_EQ(model->textures.size(), 1u);
+    EXPECT_EQ(model->textures[0], nullptr);
+    ASSERT_EQ(model->texture_errors.size(), 1u);
+    EXPECT_EQ(model->texture_errors[0].kind, AssetErrorKind::MissingDependency);
+    EXPECT_EQ(model->texture_errors[0].image_index, 0);
+    EXPECT_NE(model->texture_errors[0].source_path.find("missing_tex.png"), std::string::npos);
+    EXPECT_FALSE(model->texture_errors[0].message.empty());
+    // Same cached load: strict still fails, lenient still returns the model.
+    EXPECT_FALSE(am.load_model(path.string()).ok());
+    EXPECT_TRUE(am.load_model_lenient(path.string()).ok());
+    std::filesystem::remove(path);
+}
+
+// A texture file that exists but is garbage -> Decode error (not MissingDependency).
+TEST(Assets, GltfMalformedImageFileRecordsDecodeError) {
+    const auto dir = std::filesystem::temp_directory_path();
+    {
+        std::ofstream f(dir / "garbage_tex.png", std::ios::binary);
+        f << "this is not an image";
+    }
+    std::string json = make_gltf_triangle();
+    const std::string marker = "\"materials\":[{\"pbrMetallicRoughness\":{\"";
+    const auto pos = json.find(marker);
+    ASSERT_NE(pos, std::string::npos);
+    json.replace(pos, marker.size(),
+                 "\"images\":[{\"uri\":\"garbage_tex.png\"}],"
+                 "\"textures\":[{\"source\":0}],"
+                 "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0},\"");
+    const auto path = dir / "ignis_bad_img.gltf";
+    {
+        std::ofstream f(path);
+        f << json;
+    }
+    AssetManager am;
+    auto r = am.load_model_lenient(path.string());
+    ASSERT_TRUE(r.ok());
+    ASSERT_EQ(r.value()->texture_errors.size(), 1u);
+    EXPECT_EQ(r.value()->texture_errors[0].kind, AssetErrorKind::Decode);
+    EXPECT_EQ(r.value()->texture_errors[0].image_index, 0);
+    std::filesystem::remove(path);
+    std::filesystem::remove(dir / "garbage_tex.png");
+}
+
 namespace {
 
 namespace fs = std::filesystem;

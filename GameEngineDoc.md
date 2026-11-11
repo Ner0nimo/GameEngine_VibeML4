@@ -47,6 +47,13 @@ We're building a production-grade, simple and straight-forward 3D Game Engine fo
 - Import gltf meshes with materials and textures
 - Editor has gizmo to position them in the world
 - PBR material workflow
+- Asset-failure recovery (issue #114, fix B): loaders stay strict
+  (`load_model` fails on any failed image) and record structured per-image
+  `AssetError`s; editor modes render failed-texture primitives with
+  channel-appropriate default textures plus one deduplicated `IGNIS_WARN` per
+  model (image index, path, reason) via `load_model_lenient`; structurally
+  invalid models are dropped with a single logged warning; `PackageOnly`
+  runtime drops the mesh with an explicit `IGNIS_ERROR`, no substitution
 - Directional + point + spot lights (PBR Cook-Torrance per light; shadows on
   the directional light only)
 - IBL with HDRIs from https://polyhaven.com/hdris (diffuse irradiance +

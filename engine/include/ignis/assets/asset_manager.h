@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ignis/assets/asset_error.h"
 #include "ignis/assets/material.h"
 #include "ignis/assets/mesh.h"
 #include "ignis/assets/texture.h"
@@ -12,11 +13,16 @@
 
 namespace ignis {
 
-// A glTF model: one mesh plus its materials and textures.
+// A glTF model: one mesh plus its materials and textures. texture_errors lists
+// every image that failed to load (structured, with the original reason);
+// failed images leave a null entry in textures. load_model() still fails on
+// any texture error (strict contract); load_model_lenient() exposes the
+// partial model for the renderer's documented recovery policy (issue #114).
 struct Model {
     std::shared_ptr<Mesh> mesh;
     std::vector<Material> materials;
-    std::vector<std::shared_ptr<Texture>> textures;
+    std::vector<std::shared_ptr<Texture>> textures; // null entry = failed image
+    std::vector<AssetError> texture_errors;
 };
 
 // Where asset bytes may come from. The exported runtime must use PackageOnly
@@ -45,6 +51,13 @@ public:
 
     Result<std::shared_ptr<Model>> load_model(const std::string& path);    // .gltf/.glb
     Result<std::shared_ptr<Texture>> load_texture(const std::string& path); // .png/.jpg/.hdr/...
+
+    // Renderer recovery path (issue #114, fix B): identical to load_model,
+    // except that a model failing ONLY because of texture images still returns
+    // ok with the partial model (mesh/materials intact, failed images null) and
+    // texture_errors filled. Structural failures still fail. Shares the same
+    // cache as load_model, so there is exactly one load per path.
+    Result<std::shared_ptr<Model>> load_model_lenient(const std::string& path);
 
     // Optional pak overlay: when set, read_file prefers pak entries.
     void set_pak(class PakReader* pak) { pak_ = pak; }

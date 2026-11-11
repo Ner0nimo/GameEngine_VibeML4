@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <unordered_set>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -523,6 +524,10 @@ struct VulkanRenderer::Impl {
     struct GpuPrimitive { u32 firstIndex; u32 indexCount; u32 materialIndex; };
     struct GpuMesh { BufferHandle vb, ib; std::vector<GpuPrimitive> prims; u32 indexCount = 0; };
     std::unordered_map<std::string, std::shared_ptr<GpuMesh>> meshCache;
+    // Warn-once sets for failed models (capped; cleared when full). Failures
+    // are NOT cached in editor mode, so a fixed asset hot-recovers.
+    std::unordered_set<std::string> warnedModelFailures;
+    std::unordered_set<std::string> warnedTextureFailures;
     std::unordered_map<std::string, BindingSetHandle> materialSets;
     std::unordered_map<const Texture*, TextureHandle> texCache;
 
@@ -1042,13 +1047,31 @@ struct VulkanRenderer::Impl {
         auto it = meshCache.find(path);
         if (it != meshCache.end()) return it->second;
         AssetManager& am = assets ? *assets : ownAssets;
-        auto model_r = am.load_model(path);
-        if (!model_r.ok()) {
-            IGNIS_WARN("gpuMesh: {}", model_r.error());
+        // Recovery policy (issue #114, fix B): package-only runtime is strict
+        // (load_model fails on texture errors -> mesh dropped with an explicit
+        // error); editor modes use the lenient load and keep the geometry,
+        // drawing failed textures as placeholders (materialSetFor).
+        const bool strict = am.access_mode() == AssetAccessMode::PackageOnly;
+        auto model_r = strict ? am.load_model(path) : am.load_model_lenient(path);
+        if (!model_r.ok() || !model_r.value()->mesh || model_r.value()->mesh->primitives.empty()) {
+            // Structural failure: never recovered. Warn once per path in editor
+            // mode (not cached -> hot-reload recovers); explicit error in strict mode.
+            if (strict) {
+                IGNIS_ERROR("gpuMesh: {}", model_r.ok() ? "model has no mesh" : model_r.error());
+            } else if (warnedModelFailures.size() < 4096 &&
+                       warnedModelFailures.insert(path).second) {
+                IGNIS_WARN("gpuMesh: {} (structural failures are not recovered; mesh dropped)",
+                           model_r.ok() ? "model has no mesh" : model_r.error());
+            }
             return nullptr;
         }
         auto& model = model_r.value();
-        if (!model->mesh || model->mesh->primitives.empty()) return nullptr;
+        if (!model->texture_errors.empty() && warnedTextureFailures.size() < 4096 &&
+            warnedTextureFailures.insert(path).second) {
+            for (const AssetError& e : model->texture_errors)
+                IGNIS_WARN("model '{}': image {} ('{}') failed to load ({}); using placeholder texture",
+                           path, e.image_index, e.source_path, e.message);
+        }
 
         std::vector<f32> vertices;
         std::vector<u32> indices;
@@ -1104,7 +1127,10 @@ struct VulkanRenderer::Impl {
         auto it = materialSets.find(key);
         if (it != materialSets.end()) return it->second;
         AssetManager& am = assets ? *assets : ownAssets;
-        auto model_r = am.load_model(modelPath);
+        // Same recovery policy as gpuMesh: strict in package-only runtime,
+        // lenient (placeholders for failed images) in editor modes.
+        const bool strict = am.access_mode() == AssetAccessMode::PackageOnly;
+        auto model_r = strict ? am.load_model(modelPath) : am.load_model_lenient(modelPath);
         if (!model_r.ok()) {
             IGNIS_WARN("materialSetFor: {}", model_r.error());
             return nullptr;
