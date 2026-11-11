@@ -438,7 +438,7 @@ struct VulkanRenderer::Impl {
 
     BindingLayoutHandle layoutPushGbuffer, layoutMaterial, layoutPushShadow, layoutPushLine,
         layoutSSAO, layoutBlur, layoutLightingTex, layoutLightingUBO, layoutTonemap,
-        layoutBloomBright, layoutBloomBlur, layoutSSR, layoutSSRParams;
+        layoutBloomBright, layoutBloomBlur, layoutSSR;
     BindingSetHandle setPushGbuffer, setPushShadow, setPushLine; // empty sets for push-only layouts
 
     TextureHandle texAlbedo, texNormal, texORM, texEmissive, texWorldPos, texDepth;
@@ -503,7 +503,7 @@ struct VulkanRenderer::Impl {
     TextureHandle texPrefilterCube, texBrdfLUT;
 
     BufferHandle cbLight, cbSSAO, cbBlur, cbTonemap, cbBloom, cbSSR, cbDummy;
-    BindingSetHandle setSSAO, setBlur, setLightingTex, setLightingUBO, setSSRParams;
+    BindingSetHandle setSSAO, setBlur, setLightingTex, setLightingUBO;
     // Per-HDR-target sets (ping-pong): index = hdrIndex.
     std::array<BindingSetHandle, 2> setTonemap, setBloomBright, setSSR;
     std::array<BindingSetHandle, kBloomLevels - 1> setBloomDown; // [i-1] = source of downsample level i
@@ -814,8 +814,6 @@ struct VulkanRenderer::Impl {
         std::vector<BindingLayoutItem> ssrSlots = texSlots(5, 0);
         ssrSlots.push_back(BindingLayoutItem::ConstantBuffer(5));
         layoutSSR = makeLayout(ssrSlots, ShaderType::Pixel);
-        // lighting.frag binds the SSR params prefix block as its own set 2.
-        layoutSSRParams = makeLayout({BindingLayoutItem::ConstantBuffer(0)}, ShaderType::Pixel);
         layoutBloomBright = makeLayout({BindingLayoutItem::Texture_SRV(0), BindingLayoutItem::Sampler(0),
                                         BindingLayoutItem::ConstantBuffer(1)},
                                        ShaderType::Pixel);
@@ -845,8 +843,8 @@ struct VulkanRenderer::Impl {
         psoBlur = makePso(shFullscreenVert, shBlurFrag, nullptr, {layoutBlur}, fbR8,
                           false, false, RasterCullMode::None, 0.f);
         psoLighting = makePso(shFullscreenVert, shLightingFrag, nullptr,
-                              {layoutLightingTex, layoutLightingUBO, layoutSSRParams}, fbHDR, false,
-                              false, RasterCullMode::None, 0.f);
+                              {layoutLightingTex, layoutLightingUBO}, fbHDR, false, false,
+                              RasterCullMode::None, 0.f);
         psoTonemap = makePso(shFullscreenVert, shTonemapFrag, nullptr, {layoutTonemap}, fbFinal,
                              false, false, RasterCullMode::None, 0.f);
         psoBloomBright = makePso(shFullscreenVert, shBloomBrightFrag, nullptr, {layoutBloomBright},
@@ -990,7 +988,6 @@ struct VulkanRenderer::Impl {
             BindingSetItem::Texture_SRV(9, texBrdfLUT), BindingSetItem::Sampler(9, sampLinear),
             BindingSetItem::Texture_SRV(10, texSSR), BindingSetItem::Sampler(10, sampLinear),
         });
-        setSSRParams = makeSet(layoutSSRParams, {BindingSetItem::ConstantBuffer(0, cbSSR)});
         setLightingUBO = makeSet(layoutLightingUBO, {BindingSetItem::ConstantBuffer(0, cbLight)});
         setSSAO = makeSet(layoutSSAO, {
             BindingSetItem::Texture_SRV(0, texDepth), BindingSetItem::Sampler(0, sampNearest),
@@ -1808,7 +1805,6 @@ void VulkanRenderer::render(Scene& scene, const Camera& camera, f32 dt) {
         gs.setFramebuffer(I.fbLighting[I.hdrIndex]);
         gs.addBindingSet(I.setLightingTex);
         gs.addBindingSet(I.setLightingUBO);
-        gs.addBindingSet(I.setSSRParams);
         setViewport(gs);
         cl->setGraphicsState(gs);
         DrawArguments args;

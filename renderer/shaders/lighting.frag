@@ -27,9 +27,6 @@ layout(set = 0, binding = 137) uniform sampler samp_brdf;
 layout(set = 0, binding = 10) uniform texture2D tex_ssr; // rgba16f: rgb = reflected color, a = confidence
 layout(set = 0, binding = 138) uniform sampler samp_ssr;
 
-layout(set = 2, binding = 256) uniform SSRParams {
-    vec4 params; // x = ssr enabled, y = ssr strength
-} ssrParams;
 
 layout(set = 1, binding = 256) uniform UniformBuffer {
     vec3 camPos;
@@ -251,7 +248,7 @@ void main() {
     // SSR replaces the IBL specular where a confident hit exists (blend by
     // confidence, never add both), using the same BRDF/Fresnel weighting.
     vec4 ssr = texture(sampler2D(tex_ssr, samp_ssr), v_uv);
-    float ssrConf = clamp(ssr.a * ssrParams.params.y * ssrParams.params.x, 0.0, 1.0);
+    float ssrConf = clamp(ssr.a, 0.0, 1.0); // alpha already includes strength (set in ssr.frag)
     vec3 ssrSpec = ssr.rgb * (Famb * brdf.x + brdf.y);
     ambientSpec = mix(ambientSpec, ssrSpec, ssrConf);
     vec3 ambient = (ambientDiffuse + ambientSpec) * ao * ssao * ubo.ambientStrength;
