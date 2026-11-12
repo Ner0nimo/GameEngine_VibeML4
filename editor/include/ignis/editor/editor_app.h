@@ -27,6 +27,8 @@
 #include <imgui.h>
 #endif
 
+struct ImGuiInputTextCallbackData; // from imgui.h (included by the .cpp)
+
 namespace ignis {
 
 // Viewport gizmo operation shown in the editor toolbar.
@@ -104,6 +106,8 @@ private:
     bool console_autoscroll_ = true;
     bool log_show_[6] = {true, true, true, true, true, true}; // by LogLevel index
     char console_input_[512] = ""; // JSON agent command line
+    std::vector<std::string> console_history_; // Up/Down recall (issue #18)
+    int console_hist_idx_ = -1;
     std::string selected_asset_;
     char asset_filter_[128] = "";       // asset browser search filter
     std::string asset_ctx_;             // asset path the context menu acts on
@@ -201,6 +205,8 @@ private:
     void draw_bottom_panel(f32 dt);
     void draw_console();
     void draw_console_input();
+    void draw_console_line(LogLevel level, const std::string& msg); // clickable #id refs
+    static int console_input_cb(ImGuiInputTextCallbackData* d); // history + Tab completion
     void draw_asset_browser();
     void draw_asset_modals();
     void spawn_asset_at(const std::string& rel_path, f32 mx, f32 my); // viewport drop

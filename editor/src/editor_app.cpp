@@ -1941,23 +1941,102 @@ void EditorApp::draw_console() {
         const u8 idx = static_cast<u8>(level);
         if (idx < 6 && !log_show_[idx]) continue;
         if (!filter.empty() && msg.find(filter) == std::string::npos) continue;
-        ImGui::TextColored(log_color(level), "[%s] %s", to_string(level), msg.c_str());
+        draw_console_line(level, msg);
     }
     if (console_autoscroll_) ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
     draw_console_input();
 }
 
+// One console line; alive "#<id>" tokens (complete tokens only, validated
+// against the world) get a click-to-select button at the end of the line.
+void EditorApp::draw_console_line(LogLevel level, const std::string& msg) {
+    ImGui::TextColored(log_color(level), "[%s] %s", to_string(level), msg.c_str());
+    std::vector<EntityId> refs;
+    for (size_t i = 0; i + 1 < msg.size(); ++i) {
+        if (msg[i] != '#') continue;
+        const bool left_ok =
+            i == 0 || (!std::isdigit(static_cast<unsigned char>(msg[i - 1])) && msg[i - 1] != '#');
+        size_t d = i + 1;
+        while (d < msg.size() && std::isdigit(static_cast<unsigned char>(msg[d]))) ++d;
+        const bool right_ok = d >= msg.size() || !std::isdigit(static_cast<unsigned char>(msg[d]));
+        if (left_ok && right_ok && d > i + 1) {
+            const EntityId id = static_cast<EntityId>(std::stoull(msg.substr(i + 1, d - i - 1)));
+            if (scene_->world().alive(id)) refs.push_back(id);
+            i = d - 1;
+        }
+    }
+    for (EntityId id : refs) {
+        ImGui::SameLine();
+        ImGui::PushID(static_cast<int>(id));
+        char label[24];
+        std::snprintf(label, sizeof(label), "#%llu", static_cast<unsigned long long>(id));
+        if (ImGui::SmallButton(label)) select_replace(id);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("select '%s'", scene_->world().name_of(id).c_str());
+        ImGui::PopID();
+    }
+}
+
+// InputText callback: Up/Down walk the command history; Tab completes the
+// "cmd": "..." value against CommandProcessor::known_commands() (the shared
+// registry — no separate hard-coded list).
+int EditorApp::console_input_cb(ImGuiInputTextCallbackData* d) {
+    auto* self = static_cast<EditorApp*>(d->UserData);
+    if (d->EventFlag == ImGuiInputTextFlags_CallbackHistory) {
+        if (d->EventKey == ImGuiKey_UpArrow && !self->console_history_.empty()) {
+            if (self->console_hist_idx_ < 0)
+                self->console_hist_idx_ = static_cast<int>(self->console_history_.size()) - 1;
+            else if (self->console_hist_idx_ > 0)
+                --self->console_hist_idx_;
+            d->DeleteChars(0, d->BufTextLen);
+            d->InsertChars(0, self->console_history_[static_cast<size_t>(self->console_hist_idx_)].c_str());
+        } else if (d->EventKey == ImGuiKey_DownArrow && self->console_hist_idx_ >= 0) {
+            ++self->console_hist_idx_;
+            if (self->console_hist_idx_ >= static_cast<int>(self->console_history_.size()))
+                self->console_hist_idx_ = -1; // past the newest: empty line
+            d->DeleteChars(0, d->BufTextLen);
+            if (self->console_hist_idx_ >= 0)
+                d->InsertChars(0, self->console_history_[static_cast<size_t>(self->console_hist_idx_)].c_str());
+        }
+    } else if (d->EventFlag == ImGuiInputTextFlags_CallbackCompletion && d->EventKey == ImGuiKey_Tab) {
+        const std::string text(d->Buf, static_cast<size_t>(d->BufTextLen));
+        const auto key = text.find("\"cmd\"");
+        if (key == std::string::npos) return 0;
+        const auto q1 = text.find('"', key + 5);
+        if (q1 == std::string::npos) return 0;
+        const auto q2 = text.find('"', q1 + 1);
+        if (q2 == std::string::npos) return 0;
+        const std::string partial = text.substr(q1 + 1, q2 - q1 - 1);
+        for (const auto& ci : CommandProcessor::known_commands()) {
+            if (ci.name.compare(0, partial.size(), partial) == 0) {
+                d->DeleteChars(static_cast<int>(q1) + 1, static_cast<int>(q2 - q1 - 1));
+                d->InsertChars(static_cast<int>(q1) + 1, ci.name.c_str());
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
 void EditorApp::draw_console_input() {
     ImGui::PushItemWidth(-1.f);
-    const bool run = ImGui::InputTextWithHint("##cmd", "{\"cmd\": \"create_entity\", \"name\": \"Bot\"}  (Enter = run agent command)",
-                                              console_input_, sizeof(console_input_),
-                                              ImGuiInputTextFlags_EnterReturnsTrue);
-    item_tooltip("run a JSON agent command on Enter, e.g. {\"cmd\": \"list_entities\"}; "
-                 "the result is logged below");
+    const bool run = ImGui::InputTextWithHint(
+        "##cmd", "{\"cmd\": \"create_entity\", \"name\": \"Bot\"}  (Enter = run agent command)",
+        console_input_, sizeof(console_input_),
+        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory |
+            ImGuiInputTextFlags_CallbackCompletion,
+        &EditorApp::console_input_cb, this);
+    item_tooltip("run a JSON agent command on Enter; Tab completes the cmd name from the command "
+                 "registry, Up/Down recall history; #id tokens in the log are clickable");
     ImGui::PopItemWidth();
     if (run) {
-        run_console_command(console_input_);
+        const std::string line = console_input_;
+        if (!line.empty() && (console_history_.empty() || console_history_.back() != line))
+            console_history_.push_back(line);
+        if (console_history_.size() > 100) console_history_.erase(console_history_.begin());
+        console_hist_idx_ = -1;
+        run_console_command(line);
         console_input_[0] = '\0';
         ImGui::SetKeyboardFocusHere(-1); // keep focus in the input for the next command
     }

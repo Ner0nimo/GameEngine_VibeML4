@@ -217,4 +217,25 @@ std::vector<CommandResult> CommandProcessor::execute_file(const std::string& jso
     return results;
 }
 
+std::vector<CommandInfo> CommandProcessor::known_commands() {
+    return {
+        {"create_entity", "create an entity, optionally named", {"name"}},
+        {"destroy_entity", "destroy an entity", {"entity"}},
+        {"set_name", "rename an entity", {"entity", "name"}},
+        {"set_parent", "reparent an entity (0 = root)", {"entity", "parent"}},
+        {"add_component", "add or overwrite a component from JSON props (alias: set_component)",
+         {"entity", "component", "props"}},
+        {"remove_component", "remove a component from an entity", {"entity", "component"}},
+        {"get_entity", "inspect an entity: name, parent, components", {"entity"}},
+        {"list_entities", "list all entities (id + name)", {}},
+        {"spawn_prefab", "spawn a named prefab into the scene", {"prefab"}},
+        {"add_prefab", "register a prefab template", {"prefab", "template"}},
+        {"list_prefabs", "list registered prefab names", {}},
+        {"save_scene", "save the scene to a path", {"path"}},
+        {"load_model", "load a glTF model and report primitive/material/texture counts", {"path"}},
+        {"load_texture", "load an image texture and report size/hdr", {"path"}},
+        {"run_commands", "execute a .jsonl command file (one JSON command per line)", {"file"}},
+    };
+}
+
 } // namespace ignis
