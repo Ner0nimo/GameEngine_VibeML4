@@ -20,6 +20,15 @@ struct CommandResult {
     nlohmann::json data = nlohmann::json::object();
 };
 
+// Metadata describing one agent command. This is the single source of truth
+// for the editor console autocomplete, the command palette and AI-agent
+// discoverability (issue #18) — never keep a separate hard-coded list.
+struct CommandInfo {
+    std::string name;
+    std::string description;
+    std::vector<std::string> params; // notable fields, e.g. "entity", "name"
+};
+
 // JSON command interface that makes the editor (and headless runtime)
 // fully controllable by AI agents: every editor action is expressible as a
 // JSON command, e.g.
@@ -35,6 +44,8 @@ public:
     CommandResult execute(const nlohmann::json& cmd);
     // Execute a .jsonl file (one command per line); returns per-line results.
     std::vector<CommandResult> execute_file(const std::string& jsonl_path);
+    // Every command execute() understands, with description and params.
+    static std::vector<CommandInfo> known_commands();
 
     // Security boundary for path-taking commands (save_scene, load_model,
     // load_texture, run_commands). With host paths disallowed (exported

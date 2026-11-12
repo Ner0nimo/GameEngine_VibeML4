@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include "ignis/agent/commands.h"
 #include "ignis/assets/asset_manager.h"
 #include "ignis/ecs/components.h"
@@ -298,4 +300,29 @@ TEST(AgentCommands, JsonlNonObjectLinesFailOthersContinue) {
     EXPECT_TRUE(results[3].ok);
     EXPECT_EQ(scene.world().entity_count(), 2u);
     std::filesystem::remove(path);
+}
+
+TEST(AgentCommands, KnownCommandsRegistryIsComplete) {
+    const auto cmds = CommandProcessor::known_commands();
+    EXPECT_GE(cmds.size(), 15u);
+    // Every registry entry must be a command execute() actually dispatches
+    // (i.e. not "unknown cmd"), and the common ones are present with params.
+    for (const auto& ci : cmds) {
+        ASSERT_FALSE(ci.name.empty());
+        Scene scene;
+        register_builtin_components(scene.world());
+        AssetManager assets;
+        CommandProcessor proc(scene, assets);
+        // Confine any file-touching command (save_scene, run_commands, ...) to
+        // a temp dir so tests never write into the repo root.
+        proc.set_project_root(std::filesystem::temp_directory_path().string());
+        const CommandResult r = proc.execute(nlohmann::json{{"cmd", ci.name}});
+        EXPECT_EQ(r.message.find("unknown cmd"), std::string::npos)
+            << "registry lists undispatched command '" << ci.name << "'";
+    }
+    const auto it = std::find_if(cmds.begin(), cmds.end(),
+                                 [](const CommandInfo& c) { return c.name == "create_entity"; });
+    ASSERT_NE(it, cmds.end());
+    EXPECT_FALSE(it->params.empty());
+    EXPECT_EQ(it->params[0], "name");
 }
