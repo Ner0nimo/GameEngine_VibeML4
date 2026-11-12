@@ -26,6 +26,8 @@
 #include <imgui_impl_vulkan.h>
 
 #include "ignis/ecs/component_registry.h"
+#include "ignis/assets/asset_types.h"
+#include "ignis/core/path_util.h"
 #include "ignis/ecs/subtree.h"
 #include "ignis/physics/debug_draw.h"
 
@@ -1961,9 +1963,26 @@ void EditorApp::draw_console_input() {
     }
 }
 
+// Icon color per asset type, from the central registry (issue #15).
+namespace {
+ImVec4 asset_icon_color(const AssetTypeInfo* t) {
+    if (!t) return ImVec4(0.6f, 0.6f, 0.6f, 1.f);
+    switch (t->icon[0]) {
+        case 'M': return ImVec4(0.4f, 0.9f, 0.5f, 1.f);   // model
+        case 'A': return ImVec4(1.0f, 0.7f, 0.3f, 1.f);   // audio
+        case 'L': return ImVec4(0.4f, 0.6f, 1.0f, 1.f);   // script
+        case 'T': return ImVec4(0.9f, 0.5f, 0.9f, 1.f);   // texture
+        case 'S': return ImVec4(1.0f, 0.5f, 0.8f, 1.f);   // scene
+        case 'J': return ImVec4(0.7f, 0.7f, 0.4f, 1.f);   // json
+        default:  return ImVec4(0.6f, 0.6f, 0.6f, 1.f);
+    }
+}
+} // namespace
+
 void EditorApp::draw_asset_browser() {
     namespace fs = std::filesystem;
-    ImGui::TextDisabled("assets/  scripts/  scenes/  (click a file to select)");
+    ImGui::InputTextWithHint("##asset_filter", "filter...", asset_filter_, sizeof(asset_filter_));
+    item_tooltip("filter files by relative path (case-insensitive)");
     ImGui::SameLine();
     if (ImGui::SmallButton("Copy path")) {
         if (!selected_asset_.empty()) {
@@ -1974,49 +1993,275 @@ void EditorApp::draw_asset_browser() {
     item_tooltip("copy the selected file's relative path to the clipboard");
     ImGui::SameLine();
     if (ImGui::SmallButton("Use on selected")) assign_selected_asset();
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Assign the selected file to the selected entity "
-                          "(.gltf->MeshRenderer, audio->AudioSource, .lua->Script)");
+    item_tooltip("assign the selected file to the selected entity (type from the asset registry)");
     ImGui::Separator();
     ImGui::BeginChild("##assets_scroll");
     const fs::path roots[] = {"assets", "scripts", "scenes"};
-    std::function<void(const fs::path&, const fs::path&)> draw_dir = [&](const fs::path& dir, const fs::path& root) {
-        std::error_code ec;
-        if (!fs::is_directory(dir, ec)) return;
-        for (const auto& entry : fs::directory_iterator(dir, ec)) {
-            const std::string name = entry.path().filename().string();
-            if (entry.is_directory()) {
-                if (ImGui::TreeNode(name.c_str())) {
-                    draw_dir(entry.path(), root);
-                    ImGui::TreePop();
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s - click to expand/collapse", entry.path().generic_string().c_str());
-            } else {
-                const std::string rel = fs::relative(entry.path(), root).generic_string();
-                const bool sel = selected_asset_ == rel;
-                if (ImGui::Selectable(name.c_str(), sel)) selected_asset_ = rel;
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s - click to select", rel.c_str());
-                ImGui::SameLine();
-                ImGui::TextDisabled("%llu B", static_cast<unsigned long long>(entry.file_size()));
-            }
-        }
+    const std::string filter = asset_filter_;
+    auto lower = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
     };
-    for (const auto& root : roots) {
-        if (ImGui::TreeNode(root.c_str())) {
-            draw_dir(root, root);
-            ImGui::TreePop();
-        }
+    const std::string f = lower(filter);
+    // One row renderer: icon + name + size, selection, drag source, context menu.
+    auto draw_file = [&](const fs::path& path, const std::string& rel) {
+        if (!f.empty() && lower(rel).find(f) == std::string::npos) return;
+        const AssetTypeInfo* at = find_asset_type_for_file(path.filename().string());
+        ImGui::PushID(rel.c_str());
+        ImGui::TextColored(asset_icon_color(at), "%s", at ? at->icon : "?");
+        ImGui::SameLine();
+        const bool sel = selected_asset_ == rel;
+        if (ImGui::Selectable(path.filename().string().c_str(), sel)) selected_asset_ = rel;
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s/ - click to expand/collapse", root.generic_string().c_str());
+            ImGui::SetTooltip("%s (%s) - click to select, drag into the viewport to spawn, right-click for file ops",
+                              rel.c_str(), at ? at->label : "file");
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+            ImGui::SetDragDropPayload("IGNIS_ASSET", rel.c_str(), rel.size() + 1);
+            ImGui::TextColored(asset_icon_color(at), "%s %s", at ? at->icon : "?", rel.c_str());
+            ImGui::EndDragDropSource();
+        }
+        if (ImGui::BeginPopupContextItem()) {
+            asset_ctx_ = rel;
+            if (ImGui::MenuItem("Rename")) {
+                asset_rename_open_ = true;
+                std::snprintf(asset_name_buf_, sizeof(asset_name_buf_), "%s", path.filename().string().c_str());
+            }
+            if (ImGui::MenuItem("Delete")) {
+                asset_delete_open_ = true;
+                asset_delete_refs_.clear();
+                const auto refs = find_asset_references("scenes", rel);
+                if (!refs.empty()) {
+                    asset_delete_refs_ = "referenced by " + std::to_string(refs.size()) + " scene file(s), e.g. " +
+                                         refs.front();
+                }
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("%llu B", static_cast<unsigned long long>(fs::file_size(path)));
+        ImGui::PopID();
+    };
+    if (!f.empty()) {
+        // Flat filtered list across all roots.
+        for (const auto& root : roots) {
+            std::error_code ec;
+            if (!fs::is_directory(root, ec)) continue;
+            for (const auto& entry : fs::recursive_directory_iterator(root, ec))
+                if (entry.is_regular_file())
+                    draw_file(entry.path(), fs::relative(entry.path(), root).generic_string());
+        }
+    } else {
+        std::function<void(const fs::path&, const fs::path&)> draw_dir = [&](const fs::path& dir, const fs::path& root) {
+            std::error_code ec;
+            if (!fs::is_directory(dir, ec)) return;
+            for (const auto& entry : fs::directory_iterator(dir, ec)) {
+                const std::string name = entry.path().filename().string();
+                if (entry.is_directory()) {
+                    if (ImGui::TreeNode(name.c_str())) {
+                        draw_dir(entry.path(), root);
+                        ImGui::TreePop();
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s - click to expand/collapse", entry.path().generic_string().c_str());
+                } else {
+                    draw_file(entry.path(), fs::relative(entry.path(), root).generic_string());
+                }
+            }
+        };
+        for (const auto& root : roots) {
+            if (ImGui::TreeNode(root.c_str())) {
+                draw_dir(root, root);
+                ImGui::TreePop();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s/ - click to expand/collapse", root.generic_string().c_str());
+        }
+    }
+    if (ImGui::BeginPopupContextWindow("assets_bg")) {
+        if (ImGui::MenuItem("New Lua script")) new_asset_file("scripts", "new_script.lua", "-- new script\n");
+        if (ImGui::MenuItem("New scene")) new_asset_file("scenes", "untitled.scene.json", "{\n  \"name\": \"untitled\"\n}\n");
+        if (ImGui::MenuItem("New folder")) new_asset_file("assets", "new_folder", "");
+        ImGui::EndPopup();
     }
     ImGui::EndChild();
     if (!selected_asset_.empty()) ImGui::Text("selected: %s", selected_asset_.c_str());
 }
 
+// Create a file under a project root dir, with a collision-safe name. All
+// paths are constrained to the project root (never outside it).
+void EditorApp::new_asset_file(const char* root_dir, const std::string& filename, const std::string& content) {
+    namespace fs = std::filesystem;
+    fs::path target = fs::path(root_dir) / filename;
+    if (is_unsafe_resource_path(target.generic_string()) || !is_path_within_root(".", target)) {
+        IGNIS_ERROR("refusing to create '{}': outside the project root", target.generic_string());
+        return;
+    }
+    // Collision-safe: append _2, _3, ... before the extension.
+    for (u32 i = 2; fs::exists(target); ++i) {
+        const auto stem = filename.substr(0, filename.find_last_of('.'));
+        const auto ext = filename.substr(filename.find_last_of('.'));
+        target = fs::path(root_dir) / (stem + "_" + std::to_string(i) + ext);
+    }
+    std::error_code ec;
+    if (content.empty()) {
+        fs::create_directory(target, ec);
+    } else {
+        std::ofstream f(target);
+        f << content;
+    }
+    if (ec) {
+        IGNIS_ERROR("cannot create '{}': {}", target.generic_string(), ec.message());
+        return;
+    }
+    IGNIS_INFO("created {}", target.generic_string());
+}
+
+// Viewport drop target for asset drags: raycast the drop point against mesh
+// AABBs (fallback: a point in front of the camera) and spawn the asset's
+// entity there. Scene files ask before loading.
+void EditorApp::spawn_asset_at(const std::string& rel_path, f32 mx, f32 my) {
+    namespace fs = std::filesystem;
+    const AssetTypeInfo* at = find_asset_type_for_file(fs::path(rel_path).filename().string());
+    if (at && at->is_scene) {
+        scene_load_pending_ = rel_path; // confirm-load modal
+        scene_load_open_ = true;
+        return;
+    }
+    if (!at || !at->can_spawn || !at->component[0]) {
+        IGNIS_WARN("'{}' cannot be spawned into the scene", rel_path);
+        return;
+    }
+    const FramebufferSize fb = window_->framebuffer_size();
+    if (fb.width == 0 || fb.height == 0) return;
+    const f32 aspect = static_cast<f32>(fb.width) / static_cast<f32>(fb.height);
+    const f32 ndcX = (mx / static_cast<f32>(fb.width)) * 2.f - 1.f;
+    const f32 ndcY = (my / static_cast<f32>(fb.height)) * 2.f - 1.f;
+    const picking::Ray ray = picking::screen_ray(view_cam_, aspect, ndcX, -ndcY);
+    // Hit point: nearest mesh AABB along the ray, else 5 units in front.
+    math::Vec3 pos = view_cam_.position + (view_cam_.rotation * math::Vec3(0.f, 0.f, -1.f)) * 5.f;
+    f32 bestT = 1e30f;
+    for (EntityId e : scene_->world().all_entities()) {
+        if (!scene_->world().get<MeshRendererComponent>(e)) continue;
+        const auto* tc = scene_->world().get<TransformComponent>(e);
+        if (!tc) continue;
+        const math::Mat4 wm = world_matrix(scene_->world(), e);
+        const math::Vec3 center{static_cast<f32>(wm[3][0]), static_cast<f32>(wm[3][1]), static_cast<f32>(wm[3][2])};
+        if (const auto t = picking::ray_aabb(ray.origin, ray.dir, center, tc->scale * 0.5f)) {
+            if (*t < bestT) {
+                bestT = *t;
+                pos = ray.origin + ray.dir * *t;
+            }
+        }
+    }
+    World& w = scene_->world();
+    history_->begin("spawn '" + rel_path + "'");
+    const EntityId e = w.create_entity(fs::path(rel_path).filename().string());
+    w.emplace<TransformComponent>(e)->position = pos;
+    if (const ComponentTypeInfo* info = w.registry().find_by_name(at->component)) {
+        info->add_default(w, e);
+        if (info->name == "MeshRenderer") w.get<MeshRendererComponent>(e)->model_path = rel_path;
+        else if (info->name == "AudioSource") w.get<AudioSourceComponent>(e)->path = rel_path;
+        else if (info->name == "Script") w.get<ScriptComponent>(e)->path = rel_path;
+    }
+    history_->commit();
+    select_replace(e);
+    IGNIS_INFO("spawned '{}' at ({:.1f}, {:.1f}, {:.1f})", rel_path, static_cast<double>(pos.x),
+               static_cast<double>(pos.y), static_cast<double>(pos.z));
+}
+
+void EditorApp::draw_asset_modals() {
+    namespace fs = std::filesystem;
+    if (asset_rename_open_ && !asset_ctx_.empty()) {
+        ImGui::OpenPopup("Rename asset");
+        if (ImGui::BeginPopupModal("Rename asset", &asset_rename_open_, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::InputText("new name", asset_name_buf_, sizeof(asset_name_buf_));
+            if (ImGui::Button("Rename")) {
+                const fs::path src = asset_ctx_;
+                fs::path dst = src.parent_path() / asset_name_buf_;
+                if (!is_unsafe_resource_path(dst.generic_string()) && is_path_within_root(".", dst) &&
+                    !fs::exists(dst)) {
+                    std::error_code ec;
+                    fs::rename(src, dst, ec);
+                    if (ec) IGNIS_ERROR("rename failed: {}", ec.message());
+                    else {
+                        IGNIS_INFO("renamed {} -> {}", src.generic_string(), dst.generic_string());
+                        if (selected_asset_ == src.generic_string()) selected_asset_ = dst.generic_string();
+                    }
+                } else {
+                    IGNIS_ERROR("refusing to rename to '{}': unsafe or existing path", dst.generic_string());
+                }
+                asset_rename_open_ = false;
+                asset_ctx_.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                asset_rename_open_ = false;
+                asset_ctx_.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+    // Confirm-load modal for a scene file dropped into the viewport.
+    if (scene_load_open_ && !scene_load_pending_.empty()) {
+        ImGui::OpenPopup("Load scene");
+        if (ImGui::BeginPopupModal("Load scene", &scene_load_open_, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Load '%s' (unsaved changes are lost)?", scene_load_pending_.c_str());
+            if (ImGui::Button("Load")) {
+                open_scene(scene_load_pending_);
+                scene_load_open_ = false;
+                scene_load_pending_.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                scene_load_open_ = false;
+                scene_load_pending_.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+    if (asset_delete_open_ && !asset_ctx_.empty()) {
+        ImGui::OpenPopup("Delete asset");
+        if (ImGui::BeginPopupModal("Delete asset", &asset_delete_open_, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Delete '%s'?", asset_ctx_.c_str());
+            if (!asset_delete_refs_.empty())
+                ImGui::TextColored(ImVec4(1.f, 0.6f, 0.3f, 1.f), "WARNING: %s", asset_delete_refs_.c_str());
+            if (ImGui::Button("Delete")) {
+                const fs::path target = asset_ctx_;
+                if (!is_unsafe_resource_path(target.generic_string()) && is_path_within_root(".", target)) {
+                    std::error_code ec;
+                    fs::remove(target, ec);
+                    if (ec) IGNIS_ERROR("delete failed: {}", ec.message());
+                    else {
+                        IGNIS_INFO("deleted {}", target.generic_string());
+                        if (selected_asset_ == target.generic_string()) selected_asset_.clear();
+                    }
+                } else {
+                    IGNIS_ERROR("refusing to delete '{}': outside the project root", target.generic_string());
+                }
+                asset_delete_open_ = false;
+                asset_ctx_.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                asset_delete_open_ = false;
+                asset_ctx_.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+}
+
 // Assign the selected asset file to the selected entity, by extension. Adds
 // the target component with defaults if the entity doesn't have it yet.
+// Assign the selected asset file to the selected entity, using the central
+// asset-type registry (#15): the registry names the target component, the
+// editor only knows which field carries the path.
 void EditorApp::assign_selected_asset() {
     namespace fs = std::filesystem;
     if (selected_asset_.empty()) {
@@ -2028,18 +2273,14 @@ void EditorApp::assign_selected_asset() {
         IGNIS_WARN("no entity selected");
         return;
     }
-    const std::string ext = fs::path(selected_asset_).extension().string();
-    const ComponentTypeInfo* info = nullptr;
-    if (ext == ".gltf" || ext == ".glb") info = w.registry().find_by_name("MeshRenderer");
-    else if (ext == ".wav" || ext == ".mp3" || ext == ".ogg" || ext == ".flac")
-        info = w.registry().find_by_name("AudioSource");
-    else if (ext == ".lua") info = w.registry().find_by_name("Script");
-    else {
-        IGNIS_WARN("don't know how to assign '{}' to an entity", selected_asset_);
+    const AssetTypeInfo* at = find_asset_type_for_file(fs::path(selected_asset_).filename().string());
+    if (!at || !at->component[0]) {
+        IGNIS_WARN("'{}' is not assignable to an entity", selected_asset_);
         return;
     }
+    const ComponentTypeInfo* info = w.registry().find_by_name(at->component);
     if (!info) {
-        IGNIS_WARN("target component not registered");
+        IGNIS_WARN("target component '{}' not registered", at->component);
         return;
     }
     history_->begin("assign '" + selected_asset_ + "'");
@@ -2047,12 +2288,9 @@ void EditorApp::assign_selected_asset() {
     for (const auto& [type, storage] : w.storages())
         if (type == info->type) { has = storage->has(selected_); break; }
     if (!has) info->add_default(w, selected_);
-    if (ext == ".gltf" || ext == ".glb")
-        w.get<MeshRendererComponent>(selected_)->model_path = selected_asset_;
-    else if (ext == ".lua")
-        w.get<ScriptComponent>(selected_)->path = selected_asset_;
-    else
-        w.get<AudioSourceComponent>(selected_)->path = selected_asset_;
+    if (info->name == "MeshRenderer") w.get<MeshRendererComponent>(selected_)->model_path = selected_asset_;
+    else if (info->name == "AudioSource") w.get<AudioSourceComponent>(selected_)->path = selected_asset_;
+    else if (info->name == "Script") w.get<ScriptComponent>(selected_)->path = selected_asset_;
     history_->commit();
     IGNIS_INFO("assigned '{}' to '{}'", selected_asset_, w.name_of(selected_));
 }
@@ -2408,6 +2646,16 @@ void EditorApp::main_loop() {
         if (std::fabs(cs.x - content_scale_) > 0.01f) apply_content_scale(cs.x);
 
         handle_viewport_input(camera, camEntity, dt);
+        // Asset dragged from the browser and released over the viewport: spawn
+        // it at the raycast hit point (scene files ask first).
+        if (const ImGuiPayload* pl = ImGui::GetDragDropPayload()) {
+            if (std::strcmp(pl->DataType, "IGNIS_ASSET") == 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+                !io.WantCaptureMouse) {
+                double dmx = 0.0, dmy = 0.0;
+                glfwGetCursorPos(window_->handle(), &dmx, &dmy);
+                spawn_asset_at(static_cast<const char*>(pl->Data), static_cast<f32>(dmx), static_cast<f32>(dmy));
+            }
+        }
         // time_scale affects simulation time only, never the render frame rate
         if (playing_) scene_->update(dt * scene_->settings().time_scale);
         publish_view_camera(camera, camEntity);
@@ -2452,6 +2700,7 @@ void EditorApp::main_loop() {
         if (show_statusbar_) draw_status_bar(dt);
         draw_save_as_modal();
         draw_prefab_modal();
+        draw_asset_modals();
         draw_help_window();
         const f32 aspect = fb.height > 0 ? static_cast<f32>(fb.width) / static_cast<f32>(fb.height) : 1.f;
         draw_viewport_gizmo(camera, aspect);

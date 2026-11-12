@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
 #include "ignis/assets/asset_manager.h"
+#include "ignis/assets/asset_types.h"
 #include "ignis/core/pak.h"
 
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <fstream>
 
 using namespace ignis;
@@ -654,4 +656,59 @@ TEST(AssetsSecurity, PngHugeButAllocatableDimensionsRejected) {
     AssetManager am;
     EXPECT_FALSE(am.load_texture(p.string()).ok());
     fs::remove(p);
+}
+
+// --- asset type registry (issue #15) -------------------------------------------
+
+TEST(AssetTypes, LookupByExtensionAndFile) {
+    const auto* gltf = find_asset_type(".gltf");
+    ASSERT_NE(gltf, nullptr);
+    EXPECT_STREQ(gltf->component, "MeshRenderer");
+    EXPECT_TRUE(gltf->can_spawn);
+    EXPECT_STREQ(gltf->icon, "M");
+
+    const auto* wav = find_asset_type(".wav");
+    ASSERT_NE(wav, nullptr);
+    EXPECT_STREQ(wav->component, "AudioSource");
+
+    const auto* lua = find_asset_type(".lua");
+    ASSERT_NE(lua, nullptr);
+    EXPECT_STREQ(lua->component, "Script");
+
+    // ".scene.json" suffix wins over the plain ".json" extension.
+    const auto* scene = find_asset_type_for_file("test_scene.scene.json");
+    ASSERT_NE(scene, nullptr);
+    EXPECT_TRUE(scene->is_scene);
+    EXPECT_EQ(scene->extension, ".scene.json");
+
+    const auto* plain = find_asset_type_for_file("notes.json");
+    ASSERT_NE(plain, nullptr);
+    EXPECT_FALSE(plain->is_scene);
+
+    EXPECT_EQ(find_asset_type(".xyz"), nullptr);
+    EXPECT_EQ(find_asset_type_for_file("noext"), nullptr);
+    EXPECT_FALSE(asset_types().empty());
+}
+
+TEST(AssetTypes, FindReferencesScansJsonFiles) {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "ignis_asset_ref_test";
+    fs::create_directories(dir);
+    {
+        std::ofstream f(dir / "a.scene.json");
+        f << R"({"entities":[{"components":{"MeshRenderer":{"model_path":"assets/cube.gltf"}}}]})";
+    }
+    {
+        std::ofstream f(dir / "b.json");
+        f << R"({"note":"nothing here"})";
+    }
+    {
+        std::ofstream f(dir / "c.txt"); // not json: ignored
+        f << "assets/cube.gltf";
+    }
+    const auto refs = find_asset_references(dir.string(), "assets/cube.gltf");
+    EXPECT_EQ(refs.size(), 1u);
+    EXPECT_NE(refs[0].find("a.scene.json"), std::string::npos);
+    EXPECT_TRUE(find_asset_references(dir.string(), "assets/missing.gltf").empty());
+    fs::remove_all(dir);
 }
