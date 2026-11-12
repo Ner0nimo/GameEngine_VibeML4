@@ -38,6 +38,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -154,6 +155,7 @@ Result<void> EditorApp::init_scene_and_systems(const std::string& scene_path,
     if (auto r = scene_->load_file(scene_path); !r.ok())
         return Result<void>::failure(r.error());
     history_ = std::make_unique<SceneHistory>(*scene_);
+    mark_saved();
 
     scripts_ = std::make_unique<ScriptEngine>();
     if (auto r = scripts_->init(scene_.get(), assets_.get()); !r.ok())
@@ -271,6 +273,7 @@ Result<void> EditorApp::init_imgui_ui() {
     imguiInfo.CheckVkResultFn = check_vk;
     ImGui_ImplVulkan_Init(&imguiInfo); // font texture is created lazily on first NewFrame
     load_editor_state(); // viewport/camera prefs from the previous session
+    load_recent_scenes();  // user-level recent scene list (issue #19)
     return Result<void>::success();
 }
 
@@ -817,7 +820,11 @@ void EditorApp::handle_shortcuts() {
         else if (has_sel) frame_selected();
     }
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) save_scene();
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_N, false)) new_scene();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_N, false)) prompt_if_dirty(2);
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_K, false)) {
+        show_palette_ = !show_palette_;
+        if (show_palette_) palette_idx_ = 0;
+    }
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
         if (io.KeyShift) redo();
         else undo();
@@ -827,23 +834,237 @@ void EditorApp::handle_shortcuts() {
         if (playing_) stop_play();
         else start_play();
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) window_->request_close();
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        if (show_palette_) show_palette_ = false;
+        else request_quit();
+    }
 }
 
 // --- scene actions (shared by menu bar, toolbar and keyboard shortcuts) ------
 
 void EditorApp::update_window_title() {
     glfwSetWindowTitle(window_->handle(),
-                       ("Ignis Editor - " + scene_->name() + "  [" + scene_path_ + "]").c_str());
+                       ("Ignis Editor - " + scene_->name() + (dirty_ ? "*" : "") + "  [" + scene_path_ + "]")
+                           .c_str());
 }
 
-void EditorApp::save_scene() {
-    if (auto r = scene_->save_to_file(scene_path_); r.ok()) {
-        IGNIS_INFO("scene saved to {}", scene_path_);
-        update_window_title();
-    } else {
+// The scene is "clean" when it matches the snapshot taken at last save/load.
+// Compared by content (not a mutation flag), so modify->undo reports clean.
+void EditorApp::mark_saved() {
+    saved_snapshot_ = scene_->serialize();
+    dirty_ = false;
+    update_window_title();
+}
+
+bool EditorApp::save_scene() {
+    auto r = scene_->save_to_file(scene_path_);
+    if (!r.ok()) {
         IGNIS_ERROR("{}", r.error());
+        return false;
     }
+    IGNIS_INFO("scene saved to {}", scene_path_);
+    mark_saved();
+    push_recent_scene(scene_path_);
+    return true;
+}
+
+// --- issue #19: quit/reload/new/open prompt when dirty, recent scenes ---------
+
+void EditorApp::request_quit() {
+    if (dirty_) {
+        save_prompt_open_ = true;
+        save_prompt_action_ = 0;
+    } else {
+        window_->request_close();
+    }
+}
+
+void EditorApp::prompt_if_dirty(int action, const std::string& open_path) {
+    save_prompt_action_ = action;
+    pending_open_path_ = open_path;
+    if (dirty_)
+        save_prompt_open_ = true;
+    else
+        perform_pending_action();
+}
+
+void EditorApp::perform_pending_action() {
+    switch (save_prompt_action_) {
+        case 0: window_->request_close(); break;
+        case 1: reload_scene(); break;
+        case 2: new_scene(); break;
+        case 3: open_scene(pending_open_path_); break;
+        default: break;
+    }
+    save_prompt_action_ = -1;
+}
+
+void EditorApp::draw_save_prompt() {
+    if (!save_prompt_open_) return;
+    ImGui::OpenPopup("Unsaved changes");
+    if (ImGui::BeginPopupModal("Unsaved changes", &save_prompt_open_, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("The scene '%s' has unsaved changes.", scene_->name().c_str());
+        if (ImGui::Button("Save")) {
+            if (save_scene()) {
+                save_prompt_open_ = false;
+                perform_pending_action();
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        item_tooltip("save, then continue");
+        ImGui::SameLine();
+        if (ImGui::Button("Discard")) {
+            save_prompt_open_ = false;
+            perform_pending_action();
+            ImGui::CloseCurrentPopup();
+        }
+        item_tooltip("continue without saving");
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            save_prompt_open_ = false;
+            save_prompt_action_ = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        item_tooltip("go back to editing");
+        ImGui::EndPopup();
+    }
+}
+
+std::string EditorApp::recent_scenes_path() {
+    // User-level config, not the CWD (roadmap review): ~/.ignis_editor_recent.json
+    const char* home = std::getenv("HOME");
+    if (home && home[0] != '\0') return std::string(home) + "/.ignis_editor_recent.json";
+    return "editor_recent.json";
+}
+
+void EditorApp::load_recent_scenes() {
+    std::ifstream in(recent_scenes_path());
+    if (!in) return;
+    try {
+        const auto j = nlohmann::json::parse(in);
+        if (j.is_array())
+            for (const auto& e : j)
+                if (e.is_string()) recent_scenes_.push_back(e.get<std::string>());
+    } catch (const std::exception& e) {
+        IGNIS_WARN("recent scenes unreadable: {}", e.what());
+    }
+}
+
+void EditorApp::save_recent_scenes() {
+    nlohmann::json j = nlohmann::json::array();
+    for (const auto& p : recent_scenes_) j.push_back(p);
+    std::ofstream out(recent_scenes_path());
+    if (out) out << j.dump(2);
+}
+
+void EditorApp::push_recent_scene(const std::string& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const std::string canon = fs::weakly_canonical(path, ec).generic_string();
+    const std::string p = ec ? path : canon; // canonicalized absolute path
+    std::erase(recent_scenes_, p);
+    recent_scenes_.insert(recent_scenes_.begin(), p);
+    if (recent_scenes_.size() > 8) recent_scenes_.resize(8);
+    save_recent_scenes();
+}
+
+// --- issue #19: command palette (Ctrl+K) ---------------------------------------
+
+void EditorApp::run_palette_command(const CommandInfo& ci) {
+    nlohmann::json tpl;
+    tpl["cmd"] = ci.name;
+    for (const auto& p : ci.params) tpl[p] = (p == "entity" || p == "parent") ? 0 : "";
+    const std::string text = tpl.dump();
+    std::snprintf(console_input_, sizeof(console_input_), "%s", text.c_str());
+    show_palette_ = false;
+    show_bottom_ = true;
+    bottom_tab_ = 0; // console tab
+    console_focus_pending_ = true;
+    IGNIS_INFO("palette: prepared '{}' in the console input", ci.name);
+}
+
+void EditorApp::draw_palette() {
+    if (!show_palette_) return;
+    ImGui::SetNextWindowSize(ImVec2(560.f, 400.f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Command palette", &show_palette_, ImGuiWindowFlags_NoDocking)) {
+        ImGui::End();
+        return;
+    }
+    if (ImGui::IsWindowAppearing()) {
+        palette_filter_[0] = '\0';
+        palette_idx_ = 0;
+        ImGui::SetKeyboardFocusHere();
+    }
+    const bool enter = ImGui::InputTextWithHint("##palette_filter", "type to filter... (Ctrl+K closes)",
+                                                palette_filter_, sizeof(palette_filter_),
+                                                ImGuiInputTextFlags_EnterReturnsTrue);
+    struct Item {
+        std::string label;
+        std::string tip;
+        std::function<void()> run;
+    };
+    const bool has_sel = selected_ != NULL_ENTITY && scene_->world().alive(selected_);
+    std::vector<Item> items;
+    items.push_back({"Play / Pause", "P - snapshot + simulate, or restore", [this] {
+                         if (playing_) stop_play();
+                         else start_play();
+                     }});
+    items.push_back({"Stop (restore pre-play state)", "stop simulation and restore the snapshot", [this] { stop_play(); }});
+    items.push_back({"Save", "Ctrl+S", [this] { save_scene(); }});
+    items.push_back({"New scene", "Ctrl+N - prompt if unsaved changes", [this] { prompt_if_dirty(2); }});
+    items.push_back({"Reload from file", "discard unsaved changes", [this] { prompt_if_dirty(1); }});
+    items.push_back({"Undo", "Ctrl+Z", [this] { undo(); }});
+    items.push_back({"Redo", "Ctrl+Shift+Z / Ctrl+Y", [this] { redo(); }});
+    if (has_sel) {
+        items.push_back({"Delete selected", "Del", [this] { delete_selected(); }});
+        items.push_back({"Duplicate selected (deep)", "Ctrl+D", [this] { duplicate_selected(); }});
+        items.push_back({"Frame selected", "F", [this] { frame_selected(); }});
+    }
+    items.push_back({"Frame scene", "Shift+F - fit all entities", [this] { frame_scene(); }});
+    items.push_back({"Toggle standalone editor camera", "fly without touching the scene camera", [this] {
+                         set_standalone_camera(!standalone_cam_, find_active_camera());
+                     }});
+    items.push_back({"Toggle orthographic projection", "viewport projection mode", [this] {
+                         editor_ortho_ = !editor_ortho_;
+                         save_editor_state();
+                     }});
+    items.push_back({"Clear console", "", [this] {
+                         std::lock_guard lock(console_mutex_);
+                         console_.clear();
+                     }});
+    for (const auto& ci : CommandProcessor::known_commands()) {
+        std::string params;
+        for (const auto& p : ci.params) {
+            if (!params.empty()) params += ", ";
+            params += p;
+        }
+        items.push_back({"cmd: " + ci.name, ci.description + (params.empty() ? "" : "  [" + params + "]"),
+                         [this, ci] { run_palette_command(ci); }});
+    }
+    auto lower = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::string f = lower(palette_filter_);
+    std::vector<const Item*> filtered;
+    for (const auto& it : items)
+        if (f.empty() || lower(it.label).find(f) != std::string::npos) filtered.push_back(&it);
+    if (palette_idx_ >= static_cast<int>(filtered.size())) palette_idx_ = 0;
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false) && !filtered.empty())
+        palette_idx_ = (palette_idx_ + static_cast<int>(filtered.size()) - 1) % static_cast<int>(filtered.size());
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false) && !filtered.empty())
+        palette_idx_ = (palette_idx_ + 1) % static_cast<int>(filtered.size());
+    const bool run_selected = enter && !filtered.empty();
+    ImGui::BeginChild("##palette_list", ImVec2(0.f, 0.f), ImGuiChildFlags_Borders);
+    for (size_t i = 0; i < filtered.size(); ++i) {
+        const bool sel = static_cast<int>(i) == palette_idx_;
+        if (ImGui::Selectable(filtered[i]->label.c_str(), sel)) filtered[i]->run();
+        if (sel) ImGui::SetScrollHereY();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", filtered[i]->tip.c_str());
+    }
+    ImGui::EndChild();
+    if (run_selected) filtered[static_cast<size_t>(palette_idx_)]->run();
+    ImGui::End();
 }
 
 void EditorApp::new_scene() {
@@ -858,7 +1079,7 @@ void EditorApp::new_scene() {
         rename_target_ = NULL_ENTITY;
         history_->clear();
         scene_path_ = "scenes/untitled.scene.json"; // where Ctrl+S will write
-        update_window_title();
+        mark_saved();
         IGNIS_INFO("new empty scene");
     } else {
         IGNIS_ERROR("{}", r.error());
@@ -873,7 +1094,8 @@ void EditorApp::open_scene(const std::string& path) {
         rename_target_ = NULL_ENTITY;
         history_->clear();
         scene_path_ = path;
-        update_window_title();
+        mark_saved();
+        push_recent_scene(path);
         IGNIS_INFO("opened scene {}", path);
     } else {
         IGNIS_ERROR("{}", r.error());
@@ -887,6 +1109,7 @@ void EditorApp::reload_scene() {
         prefab_save_target_ = NULL_ENTITY; // no stale modal across scene loads
         rename_target_ = NULL_ENTITY;
         history_->clear();
+        mark_saved();
         IGNIS_INFO("scene reloaded from {}", scene_path_);
     } else {
         IGNIS_ERROR("{}", r.error());
@@ -1343,9 +1566,27 @@ void EditorApp::run_console_command(const std::string& line) {
 void EditorApp::draw_menu_bar() {
     if (!ImGui::BeginMainMenuBar()) return;
     if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("New scene", "Ctrl+N")) new_scene();
-        item_tooltip("discard the current scene and start an empty one");
+        if (ImGui::MenuItem("New scene", "Ctrl+N")) prompt_if_dirty(2);
+        item_tooltip("discard the current scene and start an empty one (asks when unsaved)");
         draw_open_scene_menu();
+        if (ImGui::BeginMenu("Recent")) {
+            if (recent_scenes_.empty()) {
+                ImGui::MenuItem("(none yet)", nullptr, false, false);
+            } else {
+                for (const auto& p : recent_scenes_) {
+                    const bool exists = std::filesystem::exists(p);
+                    if (ImGui::MenuItem(p.c_str(), nullptr, false, exists)) prompt_if_dirty(3, p);
+                    if (ImGui::IsItemHovered() && !exists)
+                        ImGui::SetTooltip("file no longer exists");
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Clear recent")) {
+                    recent_scenes_.clear();
+                    save_recent_scenes();
+                }
+            }
+            ImGui::EndMenu();
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("Save", "Ctrl+S")) save_scene();
         item_tooltip("write the scene to the current file");
@@ -1354,11 +1595,11 @@ void EditorApp::draw_menu_bar() {
             std::snprintf(save_as_buf_, sizeof(save_as_buf_), "%s", scene_path_.c_str());
         }
         item_tooltip("write the scene to a different file and make it the current one");
-        if (ImGui::MenuItem("Reload from file")) reload_scene();
-        item_tooltip("reload the scene from disk, discarding unsaved changes");
+        if (ImGui::MenuItem("Reload from file")) prompt_if_dirty(1);
+        item_tooltip("reload the scene from disk, discarding unsaved changes (asks when unsaved)");
         ImGui::Separator();
-        if (ImGui::MenuItem("Quit", "Esc")) window_->request_close();
-        item_tooltip("close the editor");
+        if (ImGui::MenuItem("Quit", "Esc")) request_quit();
+        item_tooltip("close the editor (asks to save when there are unsaved changes)");
         ImGui::EndMenu();
     }
     draw_gameobject_menu();
@@ -1464,7 +1705,7 @@ void EditorApp::draw_open_scene_menu() {
         ImGui::MenuItem("(no scenes in scenes/)", nullptr, false, false);
     } else {
         for (const auto& f : files) {
-            if (ImGui::MenuItem(f.filename().string().c_str())) open_scene(f.generic_string());
+            if (ImGui::MenuItem(f.filename().string().c_str())) prompt_if_dirty(3, f.generic_string());
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("open %s", f.generic_string().c_str());
         }
@@ -1534,7 +1775,8 @@ void EditorApp::draw_save_as_modal() {
         if (ImGui::Button("Save")) {
             if (auto r = scene_->save_to_file(save_as_buf_); r.ok()) {
                 scene_path_ = save_as_buf_;
-                update_window_title();
+                mark_saved();
+                push_recent_scene(scene_path_);
                 IGNIS_INFO("scene saved to {}", scene_path_);
                 save_as_open_ = false;
                 ImGui::CloseCurrentPopup();
@@ -2020,6 +2262,10 @@ int EditorApp::console_input_cb(ImGuiInputTextCallbackData* d) {
 }
 
 void EditorApp::draw_console_input() {
+    if (console_focus_pending_) {
+        console_focus_pending_ = false;
+        ImGui::SetKeyboardFocusHere(-1); // palette dropped a command template here
+    }
     ImGui::PushItemWidth(-1.f);
     const bool run = ImGui::InputTextWithHint(
         "##cmd", "{\"cmd\": \"create_entity\", \"name\": \"Bot\"}  (Enter = run agent command)",
@@ -2740,6 +2986,9 @@ void EditorApp::main_loop() {
         publish_view_camera(camera, camEntity);
         view_cam_ = camera;
         handle_shortcuts();
+        // Dirty = current scene differs from the last save/load snapshot
+        // (content comparison, not a mutation flag — see issue #19 review).
+        dirty_ = scene_->serialize() != saved_snapshot_;
 
         // --- scene render first: a pending resize is processed here (after
         // waitForIdle, swapchain recreated) before the UI frame starts.
@@ -2780,6 +3029,8 @@ void EditorApp::main_loop() {
         draw_save_as_modal();
         draw_prefab_modal();
         draw_asset_modals();
+        draw_palette();
+        draw_save_prompt();
         draw_help_window();
         const f32 aspect = fb.height > 0 ? static_cast<f32>(fb.width) / static_cast<f32>(fb.height) : 1.f;
         draw_viewport_gizmo(camera, aspect);
