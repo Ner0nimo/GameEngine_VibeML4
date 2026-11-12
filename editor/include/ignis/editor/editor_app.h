@@ -117,6 +117,17 @@ private:
     std::string asset_delete_refs_;     // reference warning shown in the delete modal
     std::string scene_load_pending_;     // scene file dropped into the viewport (confirm-load modal)
     bool scene_load_open_ = false;
+    // issue #19: command palette, dirty tracking, recent scenes
+    bool show_palette_ = false;
+    char palette_filter_[128] = "";
+    int palette_idx_ = 0;
+    bool dirty_ = false;
+    nlohmann::json saved_snapshot_;        // scene state at last save/load — dirty = serialize() != this
+    bool save_prompt_open_ = false;
+    int save_prompt_action_ = 0;           // 0 quit, 1 reload, 2 new, 3 open pending
+    std::string pending_open_path_;
+    bool console_focus_pending_ = false;
+    std::vector<std::string> recent_scenes_; // user-level recent list (MRU first, max 8)
     EntityId rename_target_ = NULL_ENTITY;
     char rename_buf_[128] = "";
     EntityId prefab_save_target_ = NULL_ENTITY; // "Save as prefab" modal
@@ -209,6 +220,17 @@ private:
     static int console_input_cb(ImGuiInputTextCallbackData* d); // history + Tab completion
     void draw_asset_browser();
     void draw_asset_modals();
+    void draw_palette();
+    void draw_save_prompt();
+    void request_quit();
+    void prompt_if_dirty(int action, const std::string& open_path = "");
+    void perform_pending_action();
+    void mark_saved();
+    void load_recent_scenes();
+    void save_recent_scenes();
+    void push_recent_scene(const std::string& path);
+    void run_palette_command(const CommandInfo& ci);
+    static std::string recent_scenes_path();
     void spawn_asset_at(const std::string& rel_path, f32 mx, f32 my); // viewport drop
     void new_asset_file(const char* root_dir, const std::string& filename, const std::string& content);
     void draw_stats(f32 dt);
@@ -219,7 +241,7 @@ private:
     void draw_viewport_overlay(const Camera& camera, EntityId cam_entity);
     // scene actions (shared by menus, toolbar and shortcuts)
     void update_window_title();
-    void save_scene();
+    bool save_scene(); // false on write failure (callers like the save-prompt check it)
     void new_scene();
     void open_scene(const std::string& path);
     void reload_scene();
