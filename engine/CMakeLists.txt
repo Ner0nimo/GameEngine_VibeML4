@@ -6,6 +6,7 @@ set(IGNIS_CORE_SOURCES
     src/scene/scene.cpp
     src/scene/history.cpp
     src/assets/asset_manager.cpp
+    src/assets/asset_types.cpp
     src/assets/gltf_loader.cpp
     src/assets/texture_loader.cpp
     src/assets/cgltf_impl.cpp

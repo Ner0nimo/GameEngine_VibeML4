@@ -84,7 +84,10 @@ FetchContent_Declare(cgltf
 FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG 4e9b368bfc071e97206ea5c6adba68dd0cbf8897 # master, pinned
-    GIT_SHALLOW TRUE)
+    # Not shallow: this commit is no longer reachable from any upstream ref,
+    # so a depth-1 clone cannot check it out ("unable to read tree"). Small
+    # repo, full clone keeps the exact-SHA pin reliable.
+    GIT_SHALLOW FALSE)
 FetchContent_MakeAvailable(miniaudio cgltf stb)
 
 add_library(ignis_miniaudio_headers INTERFACE)
@@ -131,7 +134,10 @@ FetchContent_Declare(imgui
     # DockSpace/DockBuilder API, needed for dockable panels, issue #56.
     # Re-pin to a tagged 1.93.1+ docking release once available.
     GIT_TAG cf53467ab0db7a783f04b32dd9160e6aa5b720ef
-    GIT_SHALLOW TRUE)
+    # Not shallow: branch-head SHAs intermittently fail a depth-1 fetch with
+    # "unable to read tree" when upstream moves on; a full clone of this SHA
+    # pin is reliable.
+    GIT_SHALLOW FALSE)
 FetchContent_Declare(imguizmo
     GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
     GIT_TAG 105e4fde45e4e74aae8973d98750820ef7aca7e2

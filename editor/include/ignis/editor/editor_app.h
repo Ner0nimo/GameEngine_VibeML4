@@ -105,6 +105,14 @@ private:
     bool log_show_[6] = {true, true, true, true, true, true}; // by LogLevel index
     char console_input_[512] = ""; // JSON agent command line
     std::string selected_asset_;
+    char asset_filter_[128] = "";       // asset browser search filter
+    std::string asset_ctx_;             // asset path the context menu acts on
+    char asset_name_buf_[256] = "";     // rename modal buffer
+    bool asset_rename_open_ = false;
+    bool asset_delete_open_ = false;
+    std::string asset_delete_refs_;     // reference warning shown in the delete modal
+    std::string scene_load_pending_;     // scene file dropped into the viewport (confirm-load modal)
+    bool scene_load_open_ = false;
     EntityId rename_target_ = NULL_ENTITY;
     char rename_buf_[128] = "";
     EntityId prefab_save_target_ = NULL_ENTITY; // "Save as prefab" modal
@@ -194,6 +202,9 @@ private:
     void draw_console();
     void draw_console_input();
     void draw_asset_browser();
+    void draw_asset_modals();
+    void spawn_asset_at(const std::string& rel_path, f32 mx, f32 my); // viewport drop
+    void new_asset_file(const char* root_dir, const std::string& filename, const std::string& content);
     void draw_stats(f32 dt);
     void draw_scene_settings();
     void draw_status_bar(f32 dt);
